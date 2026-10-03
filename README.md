@@ -1,33 +1,39 @@
-# quic-send
+# quic-send (fork)
 
-> [!WARNING]
-> This project has been archived in favor of [fsend](https://github.com/maxomatic458/fsend).
+A peer-to-peer file transfer tool that uses the QUIC protocol to transfer data over a direct connection.
 
-quic-send is a peer-to-peer file transfer tool that uses the QUIC protocol to transfer data over a direct connection (no relay involved).
+This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomatic458/quic-send), which was archived in favor of [fsend](https://github.com/maxomatic458/fsend). The upstream author moved towards WebRTC, this fork stays on QUIC, which is the better fit for large transfers.
 
 > [!NOTE]
-> Because quic-send uses NAT-traversal, a direct connection might not be possible on every network. 
+> Because quic-send uses NAT traversal, a direct connection might not be possible on every network.
 
-![demo](https://github.com/user-attachments/assets/4e3e648e-a3c5-495e-ae0e-4447b2ccfed8)
+## What this fork changes
 
-## Features
-- **P2P Data transfer**: All files are sent over a direct connection, the data is never relayed through another server. The only other parties
-involved is a STUN server (Google STUN) and an optional roundezvous server (included in this repo).
-- **UI application**: quic-send is available as a easy to use GUI application as well.
-- **Encryption**: quic-send uses the encryption provided by the [quinn](https://crates.io/crates/quinn) crate (which uses [rustls](https://crates.io/crates/rustls) and [ring](https://crates.io/crates/ring) under the hood).
-- **Resumable transfers**: If the connection is lost, the transfer can be resumed from where it left off.
-- **Transfer files & Folders**
-- **No port forwarding required**: quic-send makes use of [UDP hole punching](https://en.wikipedia.org/wiki/UDP_hole_punching) to establish a connection between the two peers, without requiring open ports.
+- **Short codes instead of long tickets**: upstream prints a base64-encoded iroh `NodeAddr` that is ~60+ characters long. This fork uses an 8-character [Crockford Base32](https://www.crockford.com/base32.html) code that is short enough to read out over the phone.
+- **Zero trust by design**: the code is not just a lookup index, it is the shared secret of a [CPace](https://datatracker.ietf.org/doc/draft-irtf-cfrg-cpace/) PAKE. The rendezvous server only ever stores an opaque blob and can neither read the peer address nor substitute its own. A hostile rendezvous server can deny service, nothing else.
+- **Post-quantum key exchange**: hybrid X25519MLKEM768, so a recorded transfer stays confidential against a future quantum adversary. The PAKE secret and the KEM secret are both mixed into the final key, an attacker has to break both.
+- **Optional password**: an extra password can be mixed into the handshake on top of the code. Unlike Magic Wormhole, it is optional, not mandatory.
+- **Serverless mode**: no rendezvous at all. Peers exchange address and public key directly, like [transmitic](https://github.com/transmitic/transmitic). Useful for server-to-server transfers and for anyone who does not want to run infrastructure.
+- **Self-hosted rendezvous and relay**: no default dependency on infrastructure operated by someone else. Rendezvous URL and iroh relay are configurable, relay can be disabled entirely.
+- **CLI only**: the Tauri GUI from upstream has been removed. One binary, no webview, no bundler toolchain.
+- **Sane destination handling**: files land in the user's Downloads folder by default instead of the current working directory, existing destination folders are no longer silently merged into, and incomplete transfers are written as `.part` files with a separate resume state.
+- **Prebuilt binaries for Windows, macOS and Linux**: upstream builds cross-platform but only ever shipped Linux releases.
+
+## Features inherited from upstream
+
+- **P2P data transfer**: files are sent over a direct connection, data is never relayed through a server by default.
+- **Encryption**: provided by [quinn](https://crates.io/crates/quinn) / [rustls](https://crates.io/crates/rustls), with peer identity pinned through the iroh `NodeId`.
+- **Resumable transfers**: if the connection drops, the transfer continues where it left off.
+- **Transfer files and folders**
+- **No port forwarding required**: UDP hole punching, provided by [iroh](https://github.com/n0-computer/iroh).
 
 ## Installation
-
-The cli version can be downloaded from crates.io:
 
 ```bash
 cargo install qs-cli
 ```
 
-Downloads to the gui version (as well as the cli version) can be found on the [releases page](https://github.com/maxomatic458/quic-send/releases)
+Prebuilt binaries for Linux, macOS and Windows are on the releases page.
 
 ## Usage
 
@@ -35,28 +41,72 @@ Downloads to the gui version (as well as the cli version) can be found on the [r
 
 ```
 $ qs send <file/folder>
-code: 123456
+code: K7X4M2QP
 on the other peer, run the following command:
 
-qs receive 123456
+qs receive K7X4M2QP
 ```
+
+Paths can be dragged into the terminal window, the shell pastes the quoted path and `qs` handles it.
 
 ### Receiving files
 
 ```
-$ qs receive 123456
+$ qs receive K7X4M2QP
 ```
 
+Files go to your Downloads folder. Override with `-o <dir>`, or `-o .` for the current directory.
+
+### With an extra password
+
+```
+$ qs send --password <file/folder>
+$ qs receive --password K7X4M2QP
+```
+
+The password is prompted for, never passed as an argument, and is mixed into the PAKE in addition to the code.
+
+### Without any server
+
+```
+$ qs send --direct <file/folder>
+$ qs receive --direct <peer-address>
+```
+
+The sender prints an address blob including its public key. No rendezvous is contacted. One side needs to be reachable.
+
+### Self-hosted rendezvous
+
+```
+$ qs send --rendezvous https://rz.example.com <file/folder>
+```
+
+Or set it once in the config file. The rendezvous server is included in this repo.
 
 ## Comparison with other file transfer tools
-| Feature | quic-send | [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) | [croc](https://github.com/schollz/croc) |
-|---------|-----------|--------------------------------------------------------------------|-----------------------------------------|
-| Encryption | ✅ | ✅ | ✅ |
-| Direct (P2P) transfer  | ✅ | (✅)* | ❌ |
-| Resumable transfers | ✅ | ❌ | ✅ |
-| Transfer files & Folders | ✅ | ✅ | ✅ |
-| (fallback) Relay server | ✅ | ✅ | ✅ |
 
-* While it is possible in Magic Wormhole, establishing a direct connection is very unlikely (as the connection tries to establish a direct TCP connection), quick send uses UDP hole punching instead which is way more reliable and works for most networks.
+| Feature | quic-send (fork) | upstream quic-send | [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) | [croc](https://github.com/schollz/croc) |
+|---------|------------------|--------------------|--------------------------------------------------------------------|-----------------------------------------|
+| Encryption | ✅ | ✅ | ✅ | ✅ |
+| Direct (P2P) transfer | ✅ | ✅ | (✅)* | ❌ |
+| Resumable transfers | ✅ | ✅ | ❌ | ✅ |
+| Transfer files & folders | ✅ | ✅ | ✅ | ✅ |
+| Short human-readable code | ✅ | ❌ | ✅ | ✅ |
+| PAKE (server cannot MitM) | ✅ | ❌ | ✅ | ✅ |
+| Post-quantum key exchange | ✅ | ❌ | ❌ | ❌ |
+| Works without any server | ✅ | ❌ | ❌ | ❌ |
+| Self-hostable infrastructure | ✅ | (✅) | ✅ | ✅ |
 
-The icon of the gui is made with the font [Commodore 64 Rounded](https://online-fonts.com/fonts/commodore-64-rounded) by Devin Cook.
+\* While it is possible in Magic Wormhole, establishing a direct connection is unlikely, since it tries to establish a direct TCP connection. quic-send uses UDP hole punching instead, which works on most networks.
+
+## Security model
+
+The code is the secret. Anything that sees the code can impersonate either peer, so do not send it through the same channel you expect to be compromised. Everything else is untrusted:
+
+- The rendezvous server sees a slot index derived from part of the code and two opaque PAKE messages. It cannot derive the key, cannot read the peer address, cannot substitute its own.
+- The relay, if enabled, sees ciphertext and traffic metadata.
+- A wrong code fails the handshake and burns the slot. One guess per attempt, no offline dictionary attack.
+
+## License
+
+MIT, same as upstream.
