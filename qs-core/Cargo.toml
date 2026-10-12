@@ -24,3 +24,4 @@ async-compression = { version = "0.4.12", features = ["tokio", "gzip"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = "3"

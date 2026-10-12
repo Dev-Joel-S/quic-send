@@ -5,6 +5,7 @@ use crate::{
         get_files_available, receive_packet, send_packet, FileSendRecvTree, FilesAvailable,
         PacketRecvError,
     },
+    destination::{local_name, validate_offer, NameError},
     packets::{ReceiverToSender, SenderToReceiver},
     BUF_SIZE, QS_ALPN, QS_PROTO_VERSION,
 };
@@ -75,7 +76,7 @@ where
     for file in files {
         match file {
             FileSendRecvTree::File { name, skip, size } => {
-                let path = root_path.join(name);
+                let path = root_path.join(local_name(name).map_err(io::Error::other)?);
 
                 let continues = tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -106,7 +107,7 @@ where
                 }
             }
             FileSendRecvTree::Dir { name, files } => {
-                let root_path = root_path.join(name);
+                let root_path = root_path.join(local_name(name).map_err(io::Error::other)?);
 
                 if !root_path.exists() {
                     std::fs::create_dir(&root_path)?;
@@ -148,6 +149,8 @@ pub enum ReceiveError {
     InvalidCode,
     #[error("receive packet error: {0}")]
     ReceivePacket(#[from] PacketRecvError),
+    #[error("{0}")]
+    FileName(#[from] NameError),
 }
 
 /// A receiver that can receive files
@@ -245,6 +248,12 @@ impl Receiver {
             p => return Err(ReceiveError::UnexpectedDataPacket(p)),
         };
 
+        if let Err(e) = validate_offer(&files_offered) {
+            send_packet(ReceiverToSender::RejectFiles, &self.conn).await?;
+            self.wait_for_close().await;
+            return Err(e.into());
+        }
+
         let output_path = match accept_files_callback(&files_offered) {
             Some(path) => path,
             None => {
@@ -258,7 +267,7 @@ impl Receiver {
         let files_available = {
             let mut files = Vec::new();
             for file in &files_offered {
-                let path = output_path.join(file.name());
+                let path = output_path.join(local_name(file.name())?);
                 files.push(get_files_available(&path).ok());
             }
 
@@ -320,7 +329,7 @@ impl Receiver {
         for file in to_receive.into_iter().flatten() {
             match file {
                 FileSendRecvTree::File { name, skip, size } => {
-                    let path = output_path.join(name);
+                    let path = output_path.join(local_name(&name)?);
                     let mut file = tokio::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
@@ -344,7 +353,7 @@ impl Receiver {
                     }
                 }
                 FileSendRecvTree::Dir { name, files } => {
-                    let path = output_path.join(name);
+                    let path = output_path.join(local_name(&name)?);
 
                     if !path.exists() {
                         std::fs::create_dir(&path)?;

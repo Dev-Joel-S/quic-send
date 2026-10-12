@@ -62,24 +62,53 @@ pub enum FilesAvailable {
 }
 /// Get the available files
 pub fn get_files_available(path: &Path) -> std::io::Result<FilesAvailable> {
+    let name = entry_name(path)?;
+
     if path.is_file() {
         Ok(FilesAvailable::File {
-            name: path.file_name().unwrap().to_str().unwrap().to_string(),
+            name,
             size: path.metadata()?.len(),
         })
     } else {
+        let mut entries = std::fs::read_dir(path)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        // Same order on every run, so a resumed transfer offers the same tree
+        entries.sort();
+
         let mut files = Vec::new();
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let path = entry.path();
-            files.push(get_files_available(&path)?);
+        for entry in entries {
+            files.push(get_files_available(&entry)?);
         }
 
-        Ok(FilesAvailable::Dir {
-            name: path.file_name().unwrap().to_str().unwrap().to_string(),
-            files,
-        })
+        Ok(FilesAvailable::Dir { name, files })
     }
+}
+
+/// The name a path is offered under
+///
+/// Paths like `.` or `..` have no file name of their own, so they are resolved first.
+fn entry_name(path: &Path) -> std::io::Result<String> {
+    let name = match path.file_name() {
+        Some(name) => name.to_owned(),
+        None => path
+            .canonicalize()?
+            .file_name()
+            .map(|n| n.to_owned())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{} has no file name", path.display()),
+                )
+            })?,
+    };
+
+    name.into_string().map_err(|name| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file name is not valid UTF-8: {}", name.to_string_lossy()),
+        )
+    })
 }
 
 impl FilesAvailable {

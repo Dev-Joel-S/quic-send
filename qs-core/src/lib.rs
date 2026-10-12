@@ -7,6 +7,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub mod common;
+pub mod destination;
 pub mod packets;
 pub mod receive;
 pub mod send;
