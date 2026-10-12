@@ -13,7 +13,7 @@ use qs_core::{
 };
 use std::{
     cell::RefCell,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
     rc::Rc,
     time::Duration,
@@ -43,8 +43,8 @@ struct Args {
 enum Mode {
     #[clap(name = "send", about = "Send files", aliases = &["s"])]
     Send {
-        /// Files/directories to send
-        #[clap(name = "files or directories", required = true)]
+        /// Files/directories to send. Leave out to drag them into the terminal instead
+        #[clap(name = "files or directories")]
         files: Vec<PathBuf>,
     },
     #[clap(name = "receive", about = "Receive files", aliases = &["r"])]
@@ -117,6 +117,22 @@ async fn main() -> color_eyre::Result<()> {
         }
         Mode::Receive { output, .. } => {
             *output = output.take().map(drop::normalize_path_arg);
+        }
+    }
+
+    // Without arguments, files are dragged into the terminal
+    if let Mode::Send { files } = &mut args.mode {
+        if files.is_empty() {
+            if !io::stdin().is_terminal() {
+                return Err(color_eyre::eyre::eyre!(
+                    "no files or directories to send given"
+                ));
+            }
+            *files = drop::select_files_interactively()?;
+            if files.is_empty() {
+                return Err(color_eyre::eyre::eyre!("no files or directories selected"));
+            }
+            println!();
         }
     }
 

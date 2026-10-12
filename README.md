@@ -61,6 +61,22 @@ qs receive K7X4M2QP
 
 Paths can be dragged into the terminal window, the shell pastes the quoted path and `qs` handles it.
 
+Or run `qs send` without any path and drag files and folders into the window one after another. Each one is listed with its size, an empty line starts the transfer:
+
+```
+$ qs send
+Drag files or folders into this window, or type their paths.
+Press Enter on an empty line to send them, Ctrl+C to cancel.
+
+> '/home/joel/Pictures/Holiday 2026'
+  + Holiday 2026/ 1.21 GiB
+> /home/joel/doc.pdf
+  + doc.pdf 340.12 KiB
+>
+```
+
+The different ways terminals paste a dropped path are understood: single quotes, backslash escapes, `file://` URIs, bare paths with spaces and, on Windows, double quotes.
+
 ### Receiving files
 
 ```

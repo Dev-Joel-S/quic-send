@@ -2798,6 +2798,7 @@ dependencies = [
  "postcard",
  "pretty_assertions",
  "qs-core",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

@@ -29,6 +29,7 @@ arboard = { version = "3.6", default-features = false, features = ["wayland-data
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = "3"
 
 [[bin]]
 path = "src/main.rs"
