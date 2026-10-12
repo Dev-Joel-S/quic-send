@@ -29,6 +29,7 @@ indicatif = "0.17.8"
 dialoguer = "0.11.0"
 colored = "3.0.0"
 color-eyre = "0.6.3"
+dirs = "7"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

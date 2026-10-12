@@ -54,6 +54,8 @@ pub enum FilesAvailable {
     File {
         name: String,
         size: u64,
+        /// Modification time in seconds since the unix epoch, if known
+        mtime: Option<u64>,
     },
     Dir {
         name: String,
@@ -65,9 +67,17 @@ pub fn get_files_available(path: &Path) -> std::io::Result<FilesAvailable> {
     let name = entry_name(path)?;
 
     if path.is_file() {
+        let metadata = path.metadata()?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
         Ok(FilesAvailable::File {
             name,
-            size: path.metadata()?.len(),
+            size: metadata.len(),
+            mtime,
         })
     } else {
         let mut entries = std::fs::read_dir(path)?
@@ -131,7 +141,7 @@ impl FilesAvailable {
     /// Convert the tree to a [FileSendRecvTree]
     pub fn to_send_recv_tree(&self) -> FileSendRecvTree {
         match self {
-            FilesAvailable::File { name, size } => FileSendRecvTree::File {
+            FilesAvailable::File { name, size, .. } => FileSendRecvTree::File {
                 name: name.to_string(),
                 skip: 0,
                 size: *size,
@@ -149,7 +159,7 @@ impl FilesAvailable {
     pub fn remove_skipped(&self, to_skip: &FilesToSkip) -> Option<FileSendRecvTree> {
         match (self, to_skip) {
             (
-                FilesAvailable::File { name, size },
+                FilesAvailable::File { name, size, .. },
                 FilesToSkip::File {
                     name: skip_name,
                     skip,
@@ -226,6 +236,7 @@ impl FilesAvailable {
                 FilesAvailable::File {
                     name: local_name,
                     size: local_size,
+                    ..
                 },
             ) => {
                 if name == local_name {
@@ -412,6 +423,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -419,10 +431,12 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 20,
+                            mtime: None,
                         },
                         FilesAvailable::File {
                             name: "file3".to_string(),
                             size: 30,
+                            mtime: None,
                         },
                     ],
                 },
@@ -435,12 +449,14 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
                     files: vec![FilesAvailable::File {
                         name: "file2".to_string(),
                         size: 15,
+                        mtime: None,
                     }],
                 },
             ],
@@ -498,6 +514,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -505,10 +522,12 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 20,
+                            mtime: None,
                         },
                         FilesAvailable::File {
                             name: "file3".to_string(),
                             size: 30,
+                            mtime: None,
                         },
                     ],
                 },
@@ -532,6 +551,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -539,16 +559,19 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 20,
+                            mtime: None,
                         },
                         FilesAvailable::File {
                             name: "file3".to_string(),
                             size: 30,
+                            mtime: None,
                         },
                         FilesAvailable::Dir {
                             name: "dir2".to_string(),
                             files: vec![FilesAvailable::File {
                                 name: "file4".to_string(),
                                 size: 40,
+                                mtime: None,
                             }],
                         },
                     ],
@@ -558,6 +581,7 @@ mod tests {
                     files: vec![FilesAvailable::File {
                         name: "file5".to_string(),
                         size: 50,
+                        mtime: None,
                     }],
                 },
             ],
@@ -569,6 +593,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -576,6 +601,7 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 5,
+                            mtime: None,
                         },
                         FilesAvailable::Dir {
                             name: "dir2".to_string(),

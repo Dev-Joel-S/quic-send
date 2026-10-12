@@ -1,16 +1,19 @@
-#![allow(clippy::suspicious_open_options)]
-
 use crate::{
     common::{
-        get_files_available, receive_packet, send_packet, FileSendRecvTree, FilesAvailable,
-        PacketRecvError,
+        receive_packet, send_packet, FileSendRecvTree, FilesAvailable, FilesToSkip, PacketRecvError,
     },
-    destination::{local_name, validate_offer, NameError},
+    destination::{
+        local_name, local_progress, part_path, resolve, validate_offer, Destination, NameError,
+        Placement, ResumeState,
+    },
     packets::{ReceiverToSender, SenderToReceiver},
     BUF_SIZE, QS_ALPN, QS_PROTO_VERSION,
 };
 use async_compression::tokio::bufread::GzipDecoder;
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
@@ -60,67 +63,94 @@ where
     Ok(true)
 }
 
+/// Receive an entry of the transfer tree to `path`.
+///
+/// Files are written to `<path>.part` and renamed to `path` once complete,
+/// so an interrupted transfer never leaves an incomplete file under its final name.
+///
 /// # Returns
 /// * `Ok(true)` if the transfer should continue
 /// * `Ok(false)` if the transfer should stop
-pub fn receive_directory<S>(
-    send: &mut S,
-    root_path: &std::path::Path,
-    files: &[FileSendRecvTree],
+pub async fn receive_entry<R>(
+    recv: &mut R,
+    path: &Path,
+    entry: &FileSendRecvTree,
     read_callback: &mut impl FnMut(u64),
     should_continue: &mut impl FnMut() -> bool,
 ) -> std::io::Result<bool>
 where
-    S: tokio::io::AsyncReadExt + Unpin + Send,
+    R: tokio::io::AsyncReadExt + Unpin,
 {
-    for file in files {
-        match file {
-            FileSendRecvTree::File { name, skip, size } => {
-                let path = root_path.join(local_name(name).map_err(io::Error::other)?);
+    match entry {
+        FileSendRecvTree::File { skip, size, .. } => {
+            let part = part_path(path);
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&part)
+                .await?;
+            // Anything past the resume point is not trusted
+            file.set_len(*skip).await?;
 
-                let continues = tokio::task::block_in_place(|| {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    rt.block_on(async {
-                        let mut file = tokio::fs::OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .open(&path)
-                            .await?;
-                        let continues = receive_file(
-                            send,
-                            &mut file,
-                            *skip,
-                            *size,
-                            read_callback,
-                            should_continue,
-                        )
-                        .await?;
+            let complete = receive_file(
+                recv,
+                &mut file,
+                *skip,
+                *size,
+                read_callback,
+                should_continue,
+            )
+            .await?;
 
-                        file.sync_all().await?;
-                        file.shutdown().await?;
-                        Ok::<bool, std::io::Error>(continues)
-                    })
-                })?;
+            file.sync_all().await?;
+            file.shutdown().await?;
+            drop(file);
 
-                if !continues {
+            if complete {
+                rename_with_retry(&part, path).await?;
+            }
+
+            Ok(complete)
+        }
+        FileSendRecvTree::Dir { files, .. } => {
+            tokio::fs::create_dir_all(path).await?;
+
+            for file in files {
+                let child = path.join(local_name(file.name()).map_err(io::Error::other)?);
+                if !Box::pin(receive_entry(
+                    recv,
+                    &child,
+                    file,
+                    read_callback,
+                    should_continue,
+                ))
+                .await?
+                {
                     return Ok(false);
                 }
             }
-            FileSendRecvTree::Dir { name, files } => {
-                let root_path = root_path.join(local_name(name).map_err(io::Error::other)?);
 
-                if !root_path.exists() {
-                    std::fs::create_dir(&root_path)?;
-                }
-
-                if !receive_directory(send, &root_path, files, read_callback, should_continue)? {
-                    return Ok(false);
-                }
-            }
+            Ok(true)
         }
     }
+}
 
-    Ok(true)
+/// Rename, retrying for a moment on Windows,
+/// where a virus scanner may still hold the freshly written file open.
+async fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match tokio::fs::rename(from, to).await {
+            Err(e)
+                if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied && attempt < 5 =>
+            {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            }
+            r => return r,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -165,7 +195,8 @@ pub struct Receiver {
 
 /// Arguments for the receiver
 pub struct ReceiverArgs {
-    /// Resume interrupted transfer
+    /// Resume interrupted transfers.
+    /// If false, existing destinations are overwritten instead.
     pub resume: bool,
 }
 
@@ -210,6 +241,7 @@ impl Receiver {
     /// # Arguments
     /// * `initial_progress_callback` - Callback with the initial progress of each file to send (name, current, total)
     /// * `accept_files_callback` - Callback to accept or reject the files (Some(path) to accept, None to reject)
+    /// * `destinations_callback` - Callback with the destination chosen for each offered file/dir
     /// * `read_callback` - Callback every time data is written to disk
     /// * `should_continue` - Callback to check if the transfer should continue
     ///
@@ -220,6 +252,7 @@ impl Receiver {
         &mut self,
         mut initial_progress_callback: impl FnMut(&[(String, u64, u64)]),
         mut accept_files_callback: impl FnMut(&[FilesAvailable]) -> Option<PathBuf>,
+        mut destinations_callback: impl FnMut(&[FilesAvailable], &[Destination]),
         read_callback: &mut impl FnMut(u64),
         should_continue: &mut impl FnMut() -> bool,
     ) -> Result<bool, ReceiveError> {
@@ -264,30 +297,24 @@ impl Receiver {
             }
         };
 
-        let files_available = {
-            let mut files = Vec::new();
-            for file in &files_offered {
-                let path = output_path.join(local_name(file.name())?);
-                files.push(get_files_available(&path).ok());
-            }
+        tokio::fs::create_dir_all(&output_path).await?;
 
-            files
-        };
+        let mut destinations: Vec<Destination> = Vec::with_capacity(files_offered.len());
+        for offered in &files_offered {
+            let destination = resolve(&output_path, offered, !self.args.resume, &destinations)?;
+            destinations.push(destination);
+        }
 
-        let files_to_skip = if self.args.resume {
-            let mut to_skip = Vec::new();
-            for (available, offered) in files_available.iter().zip(&files_offered) {
-                match available {
-                    Some(available) => to_skip.push(offered.get_skippable(available)),
-                    None => to_skip.push(None),
-                }
-            }
+        destinations_callback(&files_offered, &destinations);
 
-            to_skip
-        } else {
-            // Don't skip any files
-            vec![None; files_offered.len()]
-        };
+        let files_to_skip: Vec<Option<FilesToSkip>> = destinations
+            .iter()
+            .zip(&files_offered)
+            .map(|(destination, offered)| match destination.placement {
+                Placement::Resume => local_progress(&destination.path, offered),
+                Placement::New | Placement::Overwrite => None,
+            })
+            .collect();
 
         let to_receive: Vec<Option<FileSendRecvTree>> = files_offered
             .iter()
@@ -313,6 +340,14 @@ impl Receiver {
 
         initial_progress_callback(&progress);
 
+        // Record what is being received before the first byte is written
+        let peer = self.conn.remote_node_id().ok().map(|id| id.to_string());
+        for (destination, offered) in destinations.iter().zip(&files_offered) {
+            if destination.placement != Placement::Resume {
+                ResumeState::new(offered, peer.clone()).write(&destination.path)?;
+            }
+        }
+
         send_packet(
             ReceiverToSender::AcceptFilesSkip {
                 files: files_to_skip,
@@ -326,46 +361,24 @@ impl Receiver {
 
         let mut interrupted = false;
 
-        for file in to_receive.into_iter().flatten() {
-            match file {
-                FileSendRecvTree::File { name, skip, size } => {
-                    let path = output_path.join(local_name(&name)?);
-                    let mut file = tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .open(&path)
-                        .await?;
-
-                    interrupted = !receive_file(
-                        &mut recv,
-                        &mut file,
-                        skip,
-                        size,
-                        read_callback,
-                        should_continue,
-                    )
-                    .await?;
-                    file.sync_all().await?;
-                    file.shutdown().await?;
-
-                    if interrupted {
-                        break;
-                    }
-                }
-                FileSendRecvTree::Dir { name, files } => {
-                    let path = output_path.join(local_name(&name)?);
-
-                    if !path.exists() {
-                        std::fs::create_dir(&path)?;
-                    }
-
-                    if !receive_directory(&mut recv, &path, &files, read_callback, should_continue)?
-                    {
-                        interrupted = true;
-                        break;
-                    }
+        for (destination, entry) in destinations.iter().zip(to_receive) {
+            // [None] means everything is already there
+            if let Some(entry) = entry {
+                if !receive_entry(
+                    &mut recv,
+                    &destination.path,
+                    &entry,
+                    read_callback,
+                    should_continue,
+                )
+                .await?
+                {
+                    interrupted = true;
+                    break;
                 }
             }
+
+            ResumeState::remove(&destination.path)?;
         }
 
         self.close().await;

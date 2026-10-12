@@ -21,6 +21,7 @@ semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 iroh = { workspace = true }
 async-compression = { version = "0.4.12", features = ["tokio", "gzip"] }
+serde_json = "1"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

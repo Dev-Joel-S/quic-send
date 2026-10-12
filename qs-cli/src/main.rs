@@ -7,6 +7,7 @@ use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use iroh::{Endpoint, RelayMode, SecretKey};
 use qs_core::{
     common::FilesAvailable,
+    destination::{Destination, Placement},
     receive::{ReceiveError, Receiver, ReceiverArgs},
     send::{SendError, Sender, SenderArgs},
     QuicSendError, QS_ALPN, QS_PROTO_VERSION,
@@ -45,13 +46,13 @@ enum Mode {
     },
     #[clap(name = "receive", about = "Receive files", aliases = &["r"])]
     Receive {
-        /// Overwrite files instead of resuming
+        /// Overwrite existing files and folders instead of resuming or renaming
         #[clap(long, short = 'f')]
         overwrite: bool,
 
-        /// Custom output directory
-        #[clap(long, short, default_value = ".")]
-        output: PathBuf,
+        /// Output directory [default: your Downloads folder]
+        #[clap(long, short)]
+        output: Option<PathBuf>,
 
         /// The code to connect to the sender
         code: Option<String>,
@@ -93,7 +94,7 @@ async fn main() -> color_eyre::Result<()> {
             *files = files.drain(..).map(drop::normalize_path_arg).collect();
         }
         Mode::Receive { output, .. } => {
-            *output = drop::normalize_path_arg(std::mem::take(output));
+            *output = output.take().map(drop::normalize_path_arg);
         }
     }
 
@@ -177,6 +178,12 @@ async fn main() -> color_eyre::Result<()> {
             code,
             auto_accept,
         } => {
+            let output = resolve_output_dir(output)?;
+            println!(
+                "Files will be saved to: {}\n",
+                output.display().to_string().bright_white()
+            );
+
             let ticket = match code {
                 Some(code) => code,
                 None => dialoguer::Input::new()
@@ -222,6 +229,7 @@ async fn main() -> color_eyre::Result<()> {
                             None
                         }
                     },
+                    print_destinations,
                     &mut |last_received| {
                         if let Some(pb) = &mut *progress_bars.borrow_mut() {
                             pb.update(last_received);
@@ -236,6 +244,44 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     Ok(())
+}
+
+/// The output directory: the one given, or the Downloads folder.
+/// Created if missing and returned as an absolute path.
+fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
+    let output = output.unwrap_or_else(|| {
+        dirs::download_dir()
+            // Minimal setups often have no XDG user dirs configured
+            .or_else(|| {
+                dirs::home_dir()
+                    .map(|home| home.join("Downloads"))
+                    .filter(|d| d.is_dir())
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
+
+    std::fs::create_dir_all(&output)?;
+    std::path::absolute(output)
+}
+
+/// Show where each offered file/dir ends up, if that is not obvious
+fn print_destinations(offered: &[FilesAvailable], destinations: &[Destination]) {
+    for (offered, destination) in offered.iter().zip(destinations) {
+        let name = destination
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+
+        let note = match destination.placement {
+            Placement::New if name == offered.name() => continue,
+            Placement::New => "name already taken, saving under a new name".yellow(),
+            Placement::Resume => "resuming".green(),
+            Placement::Overwrite => "overwriting".yellow(),
+        };
+
+        println!(" - {} ({})", name.blue(), note);
+    }
 }
 
 /// Ask the receiver if they want to accept the files
