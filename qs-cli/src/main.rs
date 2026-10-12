@@ -1,12 +1,11 @@
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use copypasta::{ClipboardContext, ClipboardProvider};
 use dialoguer::theme::ColorfulTheme;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use iroh::{Endpoint, RelayMode, SecretKey};
+use iroh::{endpoint::presets, Endpoint, EndpointAddr, RelayMode, SecretKey};
 use qs_core::{
-    common::FilesAvailable,
+    common::{ConnectionPath, FilesAvailable},
     destination::{Destination, Placement},
     receive::{ReceiveError, Receiver, ReceiverArgs},
     send::{SendError, Sender, SenderArgs},
@@ -17,11 +16,15 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     rc::Rc,
-    str::FromStr,
     time::Duration,
 };
 use thiserror::Error;
 use tracing::Level;
+use tracing_subscriber::{
+    filter::{LevelFilter, Targets},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 
 mod drop;
 
@@ -63,6 +66,9 @@ enum Mode {
     },
 }
 
+/// How long the sender waits for a relay before printing its ticket anyway
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Error, Debug)]
 enum AppError {
     #[error("send error: {0}")]
@@ -76,8 +82,22 @@ async fn main() -> color_eyre::Result<()> {
     let mut args: Args = Args::parse();
 
     color_eyre::install()?;
-    tracing_subscriber::fmt()
-        .with_max_level(Level::from_str(&args.log_level.to_string()).unwrap())
+    // Dependencies (mostly iroh) only log when debugging,
+    // their errors on shutdown are noise for everyone else.
+    let level = args.log_level;
+    let dependencies = if level >= Level::DEBUG {
+        LevelFilter::from_level(level)
+    } else {
+        LevelFilter::OFF
+    };
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            Targets::new()
+                .with_target("qs", level)
+                .with_target("qs_core", level)
+                .with_default(dependencies),
+        )
         .init();
 
     // Make sure colors work correctly in cmd.exe.
@@ -107,10 +127,8 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
-    let secret_key = SecretKey::generate(rand::rngs::OsRng);
-
-    let endpoint = Endpoint::builder()
-        .secret_key(secret_key)
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::generate())
         .alpns(vec![QS_ALPN.to_vec()])
         .relay_mode(RelayMode::Default)
         .bind()
@@ -122,31 +140,42 @@ async fn main() -> color_eyre::Result<()> {
 
     match args.mode {
         Mode::Send { files } => {
-            let node_addr = endpoint.node_addr().await.map_err(|e| {
-                AppError::QuicSendCore(QuicSendError::Send(SendError::NodeAddr(e.to_string())))
-            })?;
+            // Wait until a relay is reachable, so the address is dialable from the internet.
+            // Without a network this never happens, the local address is still printed then.
+            if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
+                .await
+                .is_err()
+            {
+                tracing::warn!("no relay reachable, the ticket only has direct addresses");
+            }
 
-            let serialized =
-                bincode::serde::encode_to_vec(node_addr, bincode::config::standard()).unwrap();
+            let addr = endpoint.addr();
+            let serialized = postcard::to_stdvec(&addr).map_err(|e| {
+                AppError::QuicSendCore(QuicSendError::Send(SendError::EndpointAddr(e.to_string())))
+            })?;
             let ticket: String = BASE64_STANDARD_NO_PAD.encode(&serialized);
 
-            println!(
-                "Ticket (copied to your clipboard):\n\n{}\n",
-                ticket.bright_white()
-            );
+            // On Linux the clipboard content is gone once this is dropped,
+            // so it is kept alive until the transfer is over.
+            let clipboard = copy_to_clipboard(&ticket);
+
+            if clipboard.is_some() {
+                println!(
+                    "Ticket (copied to your clipboard):\n\n{}\n",
+                    ticket.bright_white()
+                );
+            } else {
+                println!("Ticket:\n\n{}\n", ticket.bright_white());
+            }
             println!("on the other peer, run the following command:\n");
             println!("{}", "qs receive <ticket>".yellow());
-
-            if let Ok(mut ctx) = ClipboardContext::new() {
-                let _ = ctx.set_contents(ticket);
-            }
 
             let sender_args = SenderArgs { files };
             let mut sender = Sender::connect(endpoint, sender_args).await?;
 
             // Give iroh some time to switch the connection to direct
-            std::thread::sleep(Duration::from_secs(4));
-            let conn_type = sender.connection_type().await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let conn_type = sender.connection_type();
             tracing::debug!("connected with type: {:?}", conn_type);
             println!("Connection type: {}", connection_type_info_msg(conn_type));
 
@@ -171,6 +200,8 @@ async fn main() -> color_eyre::Result<()> {
                 )
                 .await
                 .map_err(QuicSendError::Send)?;
+
+            drop(clipboard);
         }
         Mode::Receive {
             overwrite,
@@ -191,25 +222,19 @@ async fn main() -> color_eyre::Result<()> {
                     .interact()?,
             };
 
-            let node_addr = BASE64_STANDARD_NO_PAD
-                .decode(ticket.as_bytes())
-                .map_err(|_| {
-                    AppError::QuicSendCore(QuicSendError::Receive(ReceiveError::InvalidCode))
-                })?;
-
-            let node_addr: iroh::NodeAddr =
-                bincode::serde::decode_from_slice(&node_addr, bincode::config::standard())
-                    .map_err(|_| {
-                        AppError::QuicSendCore(QuicSendError::Receive(ReceiveError::InvalidCode))
-                    })?
-                    .0;
+            let invalid =
+                || AppError::QuicSendCore(QuicSendError::Receive(ReceiveError::InvalidCode));
+            let ticket = BASE64_STANDARD_NO_PAD
+                .decode(ticket.trim().as_bytes())
+                .map_err(|_| invalid())?;
+            let addr: EndpointAddr = postcard::from_bytes(&ticket).map_err(|_| invalid())?;
 
             let receiver_args = ReceiverArgs { resume: !overwrite };
-            let mut receiver = Receiver::connect(endpoint, node_addr, receiver_args).await?;
+            let mut receiver = Receiver::connect(endpoint, addr, receiver_args).await?;
 
             // Give iroh some time to switch the connection to direct
-            std::thread::sleep(Duration::from_secs(4));
-            let conn_type = receiver.connection_type().await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let conn_type = receiver.connection_type();
             tracing::debug!("connected with type: {:?}", conn_type);
             println!("Connection type: {}", connection_type_info_msg(conn_type));
 
@@ -244,6 +269,13 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     Ok(())
+}
+
+/// Put `text` on the clipboard. Returns the clipboard handle on success.
+fn copy_to_clipboard(text: &str) -> Option<arboard::Clipboard> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    clipboard.set_text(text).ok()?;
+    Some(clipboard)
 }
 
 /// The output directory: the one given, or the Downloads folder.
@@ -422,15 +454,10 @@ impl CliProgressBars {
     }
 }
 
-fn connection_type_info_msg(connection_type: Option<iroh::endpoint::ConnectionType>) -> String {
-    if let Some(conn_type) = connection_type {
-        return match conn_type {
-            iroh::endpoint::ConnectionType::Direct(_) => "Direct".green().to_string(),
-            iroh::endpoint::ConnectionType::Relay(_) => "Relay".red().to_string(),
-            iroh::endpoint::ConnectionType::Mixed(_, _) => "Mixed".yellow().to_string(),
-            iroh::endpoint::ConnectionType::None => "None".red().to_string(),
-        };
-    };
-
-    "???".red().to_string()
+fn connection_type_info_msg(connection_type: ConnectionPath) -> String {
+    match connection_type {
+        ConnectionPath::Direct => "Direct".green().to_string(),
+        ConnectionPath::Relay => "Relay".red().to_string(),
+        ConnectionPath::Unknown => "???".red().to_string(),
+    }
 }

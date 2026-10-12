@@ -1,14 +1,13 @@
 use std::path::Path;
 
 use async_compression::tokio::write::{GzipDecoder, GzipEncoder};
-use bincode::{Decode, Encode};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
 /// Tree structure that represents the files that
 /// are being sent/received
-#[derive(Debug, PartialEq, Clone, Encode, Decode, Hash)]
+#[derive(Debug, PartialEq, Clone, Hash)]
 pub enum FileSendRecvTree {
     File {
         name: String,
@@ -49,7 +48,7 @@ impl FileSendRecvTree {
 }
 
 /// Tree structure that represents the files that are available
-#[derive(Debug, PartialEq, Clone, Encode, Decode, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Hash, Serialize, Deserialize)]
 pub enum FilesAvailable {
     File {
         name: String,
@@ -297,7 +296,7 @@ impl FilesAvailable {
 }
 
 /// Tree structure that represents files that have been requested for skipping
-#[derive(Debug, PartialEq, Clone, Encode, Decode, Hash)]
+#[derive(Debug, PartialEq, Clone, Hash, Serialize, Deserialize)]
 pub enum FilesToSkip {
     File {
         name: String,
@@ -328,14 +327,37 @@ impl FilesToSkip {
     }
 }
 
-pub async fn send_packet<P: Encode + std::fmt::Debug>(
+/// How the connection to the other peer is currently routed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPath {
+    /// Straight to the other peer
+    Direct,
+    /// Through a relay server
+    Relay,
+    /// No path selected yet
+    Unknown,
+}
+
+/// The path currently used for data on `conn`
+pub fn connection_path(conn: &iroh::endpoint::Connection) -> ConnectionPath {
+    let paths = conn.paths();
+    let selected = paths.iter().find(|p| p.is_selected());
+
+    match selected {
+        Some(p) if p.is_ip() => ConnectionPath::Direct,
+        Some(p) if p.is_relay() => ConnectionPath::Relay,
+        _ => ConnectionPath::Unknown,
+    }
+}
+
+pub async fn send_packet<P: Serialize + std::fmt::Debug>(
     packet: P,
     conn: &iroh::endpoint::Connection,
 ) -> std::io::Result<()> {
     tracing::debug!("Sending packet: {:?}", packet);
     let mut send = conn.open_uni().await?;
 
-    let data = bincode::encode_to_vec(&packet, bincode::config::standard()).unwrap();
+    let data = postcard::to_stdvec(&packet).map_err(std::io::Error::other)?;
     let compressed = compress_gzip(&data).await?;
     send.write_all(&compressed).await?;
 
@@ -349,15 +371,15 @@ pub async fn send_packet<P: Encode + std::fmt::Debug>(
 pub enum PacketRecvError {
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("encode error: {0}")]
-    EncodeError(#[from] bincode::error::DecodeError),
+    #[error("decode error: {0}")]
+    Decode(#[from] postcard::Error),
     #[error("connection error: {0}")]
     Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("read error {0}")]
     Read(#[from] iroh::endpoint::ReadError),
 }
 
-pub async fn receive_packet<P: Decode<()> + std::fmt::Debug>(
+pub async fn receive_packet<P: DeserializeOwned + std::fmt::Debug>(
     conn: &iroh::endpoint::Connection,
 ) -> Result<P, PacketRecvError> {
     let mut recv = conn.accept_uni().await?;
@@ -375,7 +397,7 @@ pub async fn receive_packet<P: Decode<()> + std::fmt::Debug>(
 
     let decompressed = decompress_gzip(&buf).await?;
 
-    let packet = bincode::decode_from_slice(&decompressed, bincode::config::standard())?.0;
+    let packet = postcard::from_bytes(&decompressed)?;
 
     tracing::debug!("Received packet: {:?}", packet);
 

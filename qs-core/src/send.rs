@@ -1,7 +1,10 @@
 #![allow(clippy::suspicious_open_options)]
 
 use crate::{
-    common::{get_files_available, receive_packet, send_packet, FileSendRecvTree, PacketRecvError},
+    common::{
+        connection_path, get_files_available, receive_packet, send_packet, ConnectionPath,
+        FileSendRecvTree, PacketRecvError,
+    },
     packets::{ReceiverToSender, SenderToReceiver},
     BUF_SIZE, QS_PROTO_VERSION,
 };
@@ -119,26 +122,22 @@ pub enum SendError {
     FileDoesNotExists(PathBuf),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    // #[error("connect error: {0}")]
-    // Connect(#[from] iroh::endpoint::ConnectError),
+    #[error("connect error: {0}")]
+    Connect(String),
     #[error("connection error: {0}")]
     Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("read error: {0}")]
-    Read(#[from] quinn::ReadError),
+    Read(#[from] iroh::endpoint::ReadError),
     #[error("wrong version, the receiver expected: {0}, but got: {1}")]
     WrongVersion(String, String),
-    #[error(
-        "wrong roundezvous protocol version, the roundezvous server expected {0}, but got: {1}"
-    )]
-    WrongRoundezvousVersion(u32, u32),
     #[error("unexpected data packet: {0:?}")]
     UnexpectedDataPacket(ReceiverToSender),
     #[error("files rejected")]
     FilesRejected,
     #[error("receive packet error: {0}")]
     ReceivePacket(#[from] PacketRecvError),
-    #[error("failed to fetch node addr: {0}")]
-    NodeAddr(String),
+    #[error("failed to fetch the endpoint address: {0}")]
+    EndpointAddr(String),
 }
 
 /// A client that can send files
@@ -162,20 +161,22 @@ impl Sender {
         this_endpoint: iroh::Endpoint,
         args: SenderArgs,
     ) -> Result<Self, SendError> {
-        if let Some(incoming) = this_endpoint.accept().await {
-            let connecting = incoming.accept()?;
-            let conn = connecting.await?;
+        let Some(incoming) = this_endpoint.accept().await else {
+            return Err(SendError::Connect("the endpoint was closed".to_string()));
+        };
 
-            tracing::info!("receiver connected to sender");
+        let conn = incoming
+            .accept()?
+            .await
+            .map_err(|e| SendError::Connect(e.to_string()))?;
 
-            return Ok(Self {
-                args,
-                conn,
-                endpoint: this_endpoint,
-            });
-        }
+        tracing::info!("receiver connected to sender");
 
-        unreachable!();
+        Ok(Self {
+            args,
+            conn,
+            endpoint: this_endpoint,
+        })
     }
 
     /// Close the connection
@@ -189,10 +190,9 @@ impl Sender {
         self.conn.closed().await;
     }
 
-    /// Get the type of the connection
-    pub async fn connection_type(&self) -> Option<iroh::endpoint::ConnectionType> {
-        let node_id = self.conn.remote_node_id().ok()?;
-        self.endpoint.conn_type(node_id).ok()?.get().ok()
+    /// How the connection is currently routed
+    pub fn connection_type(&self) -> ConnectionPath {
+        connection_path(&self.conn)
     }
 
     /// Send files
@@ -337,6 +337,8 @@ impl Sender {
         } else {
             tracing::info!("the transfer was interrupted");
         }
+
+        self.close().await;
 
         Ok(!interrupted)
     }

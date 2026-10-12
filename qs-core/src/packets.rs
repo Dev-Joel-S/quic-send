@@ -1,8 +1,8 @@
 use crate::common::{FilesAvailable, FilesToSkip};
-use bincode::{Decode, Encode};
+use serde::{Deserialize, Serialize};
 
 /// All packets send from the sender to the receiver
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SenderToReceiver {
     /// Initial connection request
     ConnRequest { version_num: String },
@@ -11,7 +11,7 @@ pub enum SenderToReceiver {
 }
 
 /// All packets send from the receiver to the sender
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReceiverToSender {
     /// Reject the connection request, because the version number is wrong
     WrongVersion { expected: String },

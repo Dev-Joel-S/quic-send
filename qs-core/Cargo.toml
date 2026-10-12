@@ -13,14 +13,10 @@ keywords = ["quic", "file-transfer", "peer-to-peer"]
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-quinn = { workspace = true }
-rustls = { workspace = true }
-rcgen = { workspace = true }
-bincode = { workspace = true }
-semver = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+postcard = { workspace = true }
+serde = { workspace = true }
 iroh = { workspace = true }
-async-compression = { version = "0.4.12", features = ["tokio", "gzip"] }
+async-compression = { workspace = true }
 serde_json = "1"
 
 [dev-dependencies]

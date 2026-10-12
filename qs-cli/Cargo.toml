@@ -14,22 +14,18 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-quinn = { workspace = true }
-semver = { workspace = true }
 iroh = { workspace = true }
-rand = { workspace = true }
-bincode = { workspace = true, features = ["serde"] }
-copypasta = { workspace = true }
+postcard = { workspace = true }
 base64 = { workspace = true }
-
-clap = { version = "4.5.31", features = ["derive"] }
 qs-core = { workspace = true }
-async-compression = { version = "0.4.12", features = ["tokio", "gzip"] }
-indicatif = "0.17.8"
-dialoguer = "0.11.0"
-colored = "3.0.0"
-color-eyre = "0.6.3"
+
+clap = { version = "4.6", features = ["derive"] }
+indicatif = "0.18"
+dialoguer = "0.12"
+colored = "3.1"
+color-eyre = "0.6.5"
 dirs = "7"
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
@@ -37,4 +33,3 @@ pretty_assertions = { workspace = true }
 [[bin]]
 path = "src/main.rs"
 name = "qs"
-

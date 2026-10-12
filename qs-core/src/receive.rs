@@ -1,6 +1,7 @@
 use crate::{
     common::{
-        receive_packet, send_packet, FileSendRecvTree, FilesAvailable, FilesToSkip, PacketRecvError,
+        connection_path, receive_packet, send_packet, ConnectionPath, FileSendRecvTree,
+        FilesAvailable, FilesToSkip, PacketRecvError,
     },
     destination::{
         local_name, local_progress, part_path, resolve, validate_offer, Destination, NameError,
@@ -162,15 +163,11 @@ pub enum ReceiveError {
     #[error("connection error: {0}")]
     Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("write error: {0}")]
-    Write(#[from] quinn::WriteError),
+    Write(#[from] iroh::endpoint::WriteError),
     #[error("read error {0}")]
-    Read(#[from] quinn::ReadError),
+    Read(#[from] iroh::endpoint::ReadError),
     #[error("version mismatch, expected: {0}, got: {1}")]
     WrongVersion(String, String),
-    #[error(
-        "wrong roundezvous protocol version, the roundezvous server expected {0}, but got: {1}"
-    )]
-    WrongRoundezvousVersion(u32, u32),
     #[error("unexpected data packet: {0:?}")]
     UnexpectedDataPacket(SenderToReceiver),
     #[error("files rejected")]
@@ -203,11 +200,11 @@ pub struct ReceiverArgs {
 impl Receiver {
     pub async fn connect(
         this_endpoint: iroh::Endpoint,
-        node_addr: iroh::NodeAddr,
+        addr: iroh::EndpointAddr,
         args: ReceiverArgs,
     ) -> Result<Self, ReceiveError> {
         let conn = this_endpoint
-            .connect(node_addr, QS_ALPN)
+            .connect(addr, QS_ALPN)
             .await
             .map_err(|e| ReceiveError::Connect(e.to_string()))?;
 
@@ -231,10 +228,9 @@ impl Receiver {
         self.conn.closed().await;
     }
 
-    /// Get the type of the connection
-    pub async fn connection_type(&self) -> Option<iroh::endpoint::ConnectionType> {
-        let node_id = self.conn.remote_node_id().ok()?;
-        self.endpoint.conn_type(node_id).ok()?.get().ok()
+    /// How the connection is currently routed
+    pub fn connection_type(&self) -> ConnectionPath {
+        connection_path(&self.conn)
     }
 
     /// Receive files
@@ -341,7 +337,7 @@ impl Receiver {
         initial_progress_callback(&progress);
 
         // Record what is being received before the first byte is written
-        let peer = self.conn.remote_node_id().ok().map(|id| id.to_string());
+        let peer = Some(self.conn.remote_id().to_string());
         for (destination, offered) in destinations.iter().zip(&files_offered) {
             if destination.placement != Placement::Resume {
                 ResumeState::new(offered, peer.clone()).write(&destination.path)?;

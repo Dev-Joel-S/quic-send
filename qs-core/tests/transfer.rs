@@ -1,6 +1,6 @@
 //! End to end transfers between two local endpoints, without relay or discovery.
 
-use iroh::{Endpoint, NodeAddr, RelayMode};
+use iroh::{endpoint::presets, Endpoint, EndpointAddr, RelayMode};
 use qs_core::{
     destination::{Destination, Placement},
     receive::{ReceiveError, Receiver, ReceiverArgs},
@@ -18,7 +18,7 @@ use std::{
 };
 
 async fn endpoint() -> Endpoint {
-    Endpoint::builder()
+    Endpoint::builder(presets::Minimal)
         .alpns(vec![QS_ALPN.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()
@@ -26,10 +26,14 @@ async fn endpoint() -> Endpoint {
         .unwrap()
 }
 
-fn local_addr(endpoint: &Endpoint) -> NodeAddr {
-    let (v4, _) = endpoint.bound_sockets();
-    NodeAddr::new(endpoint.node_id())
-        .with_direct_addresses([SocketAddr::new(Ipv4Addr::LOCALHOST.into(), v4.port())])
+fn local_addr(endpoint: &Endpoint) -> EndpointAddr {
+    let v4 = endpoint
+        .bound_sockets()
+        .into_iter()
+        .find(|a| a.is_ipv4())
+        .unwrap();
+    EndpointAddr::new(endpoint.id())
+        .with_ip_addr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), v4.port()))
 }
 
 /// Deterministic pseudo random content
