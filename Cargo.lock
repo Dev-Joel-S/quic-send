@@ -4732,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "qs-cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-compression",
  "base64 0.22.1",
@@ -4744,7 +4744,7 @@ dependencies = [
  "dialoguer",
  "indicatif",
  "iroh",
- "qs-core 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qs-core",
  "quinn",
  "rand 0.8.5",
  "semver",
@@ -4756,31 +4756,12 @@ dependencies = [
 
 [[package]]
 name = "qs-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-compression",
  "bincode",
  "iroh",
  "pretty_assertions",
- "quinn",
- "rcgen",
- "rustls",
- "semver",
- "serde",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qs-core"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eaa394b41cc433929e76f2918f8366487f0c24f96da95634f5e56ecdbf381af"
-dependencies = [
- "async-compression",
- "bincode",
- "iroh",
  "quinn",
  "rcgen",
  "rustls",
@@ -4799,7 +4780,7 @@ dependencies = [
  "bincode",
  "iroh",
  "lazy_static",
- "qs-core 0.4.1",
+ "qs-core",
  "rand 0.8.5",
  "serde",
  "serde_json",

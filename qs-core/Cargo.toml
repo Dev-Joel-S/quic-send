@@ -1,10 +1,10 @@
 [package]
 name = "qs-core"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["Maxomatic458"]
 description = "quic send core library"
-repository = "https://github.com/maxomatic458/quic-send"
+repository = "https://github.com/dev-joel-s/quic-send"
 readme = "../README.md"
 license = "MIT"
 keywords = ["quic", "file-transfer", "peer-to-peer"]
