@@ -17,7 +17,7 @@ This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomat
 - **Self-hosted rendezvous and relay**: no default dependency on infrastructure operated by someone else. Rendezvous URL and iroh relay are configurable, relay can be disabled entirely.
 - **CLI only**: the Tauri GUI from upstream has been removed. One binary, no webview, no bundler toolchain.
 - **Sane destination handling**: files land in the user's Downloads folder by default instead of the current working directory, existing destination folders are no longer silently merged into, and incomplete transfers are written as `.part` files with a separate resume state.
-- **Prebuilt binaries for Windows, macOS and Linux**: upstream builds cross-platform but only ever shipped Linux releases.
+- **Prebuilt binaries for Linux and Windows**: a static Linux binary that runs on any distribution (Debian, Arch, NixOS, ...), a `.deb` package, an Arch `PKGBUILD` and a standalone Windows `.exe`.
 
 ## Features inherited from upstream
 
@@ -29,11 +29,23 @@ This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomat
 
 ## Installation
 
-```bash
-cargo install qs-cli
-```
+Prebuilt downloads are on the [releases page](https://github.com/dev-joel-s/quic-send/releases):
 
-Prebuilt binaries for Linux, macOS and Windows are on the releases page.
+| Platform | Download |
+|----------|----------|
+| Any Linux (Debian, Arch, NixOS, ...) | `qs-<version>-x86_64-linux.tar.gz`, a static binary without dependencies |
+| Debian, Ubuntu | `quic-send_<version>-1_amd64.deb`, install with `sudo apt install ./quic-send_*.deb` |
+| Windows | `qs-<version>-x86_64-windows.exe`, a standalone executable |
+
+`SHA256SUMS` lists the checksums of all files.
+
+On Arch Linux, build the package with the [PKGBUILD](packaging/arch/PKGBUILD) (`makepkg -si` in that directory). Note that `quickshell` also installs a `qs` command.
+
+From source, with a Rust toolchain:
+
+```bash
+cargo install --locked --git https://github.com/dev-joel-s/quic-send qs-cli
+```
 
 ## Usage
 

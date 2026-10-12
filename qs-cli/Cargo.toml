@@ -33,3 +33,20 @@ pretty_assertions = { workspace = true }
 [[bin]]
 path = "src/main.rs"
 name = "qs"
+
+[package.metadata.deb]
+name = "quic-send"
+maintainer = "Joel Summa <74009152+Dev-Joel-S@users.noreply.github.com>"
+copyright = "2024 Maxomatic458, 2026 Joel Summa"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Peer-to-peer file transfer over QUIC. Files and folders are sent over a \
+direct, encrypted connection, interrupted transfers are resumed."""
+section = "net"
+priority = "optional"
+# The release binary is statically linked against musl
+depends = ""
+assets = [
+    ["target/release/qs", "usr/bin/", "755"],
+    ["../README.md", "usr/share/doc/quic-send/README.md", "644"],
+]

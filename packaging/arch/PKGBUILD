@@ -1,0 +1,44 @@
+# Maintainer: Joel Summa <74009152+Dev-Joel-S@users.noreply.github.com>
+#
+# Builds quic-send from the source of a tagged release.
+# After bumping pkgver, run `updpkgsums` to fill in the checksum.
+
+pkgname=quic-send
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="Peer-to-peer file transfer over QUIC"
+arch=('x86_64' 'aarch64')
+url="https://github.com/dev-joel-s/quic-send"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo')
+# quickshell also installs /usr/bin/qs
+conflicts=('quickshell')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p qs-cli
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/qs "$pkgdir/usr/bin/qs"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

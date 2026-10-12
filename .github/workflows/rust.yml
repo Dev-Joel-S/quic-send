@@ -1,24 +1,66 @@
 name: Rust
 
-on: [pull_request]
+on:
+  pull_request:
+  push:
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --locked
+
+      # iroh is also built as a cdylib, which in debug mode exports more
+      # symbols than a Windows DLL can hold
+      - name: Tests (release)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --locked --release
+
+  musl:
+    name: Static Linux build
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    
-    - name: Rustfmt
-      run: cargo fmt --all -- --check
+      - uses: actions/checkout@v4
 
-    - name: Clippy
-      run: cargo clippy ${{ matrix.flags }} --all-targets --all -- -D warnings
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --locked -p qs-cli --target x86_64-unknown-linux-musl
+
+      - name: Check that the binary is static
+        run: file target/x86_64-unknown-linux-musl/debug/qs | grep -q "static"
