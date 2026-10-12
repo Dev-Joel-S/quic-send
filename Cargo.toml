@@ -2,7 +2,6 @@
 members = [
     "qs-core",
     "qs-cli",
-    "qs-gui/src-tauri"
 ]
 
 resolver = "2"
@@ -30,7 +29,6 @@ rand = "0.8.5" # 0.8.5 because of iroh
 semver = "1.0.25"
 serde = { version = "1", features = ["derive"] }
 iroh = { version = "0.35.0" }
-hex = "0.4.3"
 copypasta = "0.10.1"
 base64 = "0.22.1"
 

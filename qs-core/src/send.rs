@@ -225,7 +225,10 @@ impl Sender {
         match receive_packet::<ReceiverToSender>(&self.conn).await? {
             ReceiverToSender::Ok => (),
             ReceiverToSender::WrongVersion { expected } => {
-                return Err(SendError::WrongVersion(expected, QS_PROTO_VERSION.to_string()));
+                return Err(SendError::WrongVersion(
+                    expected,
+                    QS_PROTO_VERSION.to_string(),
+                ));
             }
             p => return Err(SendError::UnexpectedDataPacket(p)),
         }

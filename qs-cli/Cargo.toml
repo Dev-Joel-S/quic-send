@@ -30,6 +30,9 @@ dialoguer = "0.11.0"
 colored = "3.0.0"
 color-eyre = "0.6.3"
 
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
 [[bin]]
 path = "src/main.rs"
 name = "qs"

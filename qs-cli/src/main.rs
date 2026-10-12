@@ -22,6 +22,8 @@ use std::{
 use thiserror::Error;
 use tracing::Level;
 
+mod drop;
+
 #[derive(Parser, Debug)]
 #[clap(version = QS_PROTO_VERSION, author = env!("CARGO_PKG_AUTHORS"))]
 struct Args {
@@ -70,7 +72,7 @@ enum AppError {
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
-    let args: Args = Args::parse();
+    let mut args: Args = Args::parse();
 
     color_eyre::install()?;
     tracing_subscriber::fmt()
@@ -84,6 +86,16 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     tracing::debug!("qs {}", QS_PROTO_VERSION);
+
+    // Paths may have been dragged into the terminal
+    match &mut args.mode {
+        Mode::Send { files } => {
+            *files = files.drain(..).map(drop::normalize_path_arg).collect();
+        }
+        Mode::Receive { output, .. } => {
+            *output = drop::normalize_path_arg(std::mem::take(output));
+        }
+    }
 
     // Check if the files even exist
     if let Mode::Send { files, .. } = &args.mode {
