@@ -68,6 +68,8 @@ enum Mode {
 
 /// How long the sender waits for a relay before printing its ticket anyway
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the sender waits for any address after that
+const ADDR_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Error, Debug)]
 enum AppError {
@@ -149,7 +151,21 @@ async fn main() -> color_eyre::Result<()> {
                 tracing::warn!("no relay reachable, the ticket only has direct addresses");
             }
 
-            let addr = endpoint.addr();
+            // Local addresses can show up a moment after binding
+            let mut addr = endpoint.addr();
+            let deadline = tokio::time::Instant::now() + ADDR_TIMEOUT;
+            while addr.is_empty() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                addr = endpoint.addr();
+            }
+            if addr.is_empty() {
+                return Err(
+                    AppError::QuicSendCore(QuicSendError::Send(SendError::EndpointAddr(
+                        "neither a relay nor a local network address is available".to_string(),
+                    )))
+                    .into(),
+                );
+            }
             let serialized = postcard::to_stdvec(&addr).map_err(|e| {
                 AppError::QuicSendCore(QuicSendError::Send(SendError::EndpointAddr(e.to_string())))
             })?;
