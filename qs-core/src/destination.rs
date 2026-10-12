@@ -182,6 +182,8 @@ pub struct ResumeState {
     pub format: u32,
     /// Protocol version of the transfer
     pub version: String,
+    // TODO: once peers have a stable identity (`crate::peers`), compare the peer when
+    // deciding whether to resume, as the spec asked. Until then it must stay informational.
     /// The sender, for information only. Endpoint ids are not stable across runs.
     pub peer: Option<String>,
     /// The entry that was offered, with sizes and modification times

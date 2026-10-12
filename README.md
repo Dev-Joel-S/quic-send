@@ -1,3 +1,11 @@
+<!--
+TODO: this README describes the planned state of the fork. Short codes, the PAKE, the
+post-quantum exchange, the optional password, `--direct`, the rendezvous server and the
+config file are not implemented yet, `qs` still prints a ticket. Either mark every section
+as planned or finish the work before merging to master. The "Features inherited from
+upstream" section also still names quinn, rustls and `NodeId`, which are gone.
+-->
+
 # quic-send (fork)
 
 A peer-to-peer file transfer tool that uses the QUIC protocol to transfer data over a direct connection.

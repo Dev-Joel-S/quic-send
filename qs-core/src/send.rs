@@ -161,6 +161,10 @@ impl Sender {
         this_endpoint: iroh::Endpoint,
         args: SenderArgs,
     ) -> Result<Self, SendError> {
+        // TODO: accept only the `EndpointId` that pairing (or `peers`) told us to expect, and
+        // close every other connection right away. Today the first connection of anyone is
+        // taken, so whoever has the ticket can take the files. Also stop accepting after the
+        // first valid receiver. See `crate::peers` and `crate::pairing`.
         let Some(incoming) = this_endpoint.accept().await else {
             return Err(SendError::Connect("the endpoint was closed".to_string()));
         };

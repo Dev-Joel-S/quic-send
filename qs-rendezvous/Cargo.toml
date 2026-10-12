@@ -1,0 +1,15 @@
+[package]
+name = "qs-rendezvous"
+version = "0.5.0"
+edition = "2021"
+description = "Rendezvous server for quic-send, an untrusted mailbox for pairing"
+repository = "https://github.com/dev-joel-s/quic-send"
+license = "MIT"
+publish = false
+
+# TODO: dependencies: an async HTTP server (axum proposed), tokio, serde, tracing, and
+#       the shared message types of the pairing protocol.
+# TODO: add a `[[bin]]` named `qs-rendezvous` with a `src/main.rs` once there is a server to
+#       start. Until then this crate only holds the plan.
+# TODO: musl and Windows builds in CI, release the binary next to `qs` (a .deb with a
+#       systemd unit would be nice for self-hosting).

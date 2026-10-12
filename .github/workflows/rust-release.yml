@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# TODO: this workflow has never run. Start it once by hand (workflow_dispatch) and check
+#       that the MSVC build, `cargo deb` and the artifacts work before tagging a release.
+
 jobs:
   linux:
     name: Linux (static musl, .deb)

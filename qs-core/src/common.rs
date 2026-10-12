@@ -379,6 +379,8 @@ pub enum PacketRecvError {
     Read(#[from] iroh::endpoint::ReadError),
 }
 
+// TODO: limit how much is read and how much the decompressed packet may have,
+// see `crate::limits`. This reads until the stream ends without any bound.
 pub async fn receive_packet<P: DeserializeOwned + std::fmt::Debug>(
     conn: &iroh::endpoint::Connection,
 ) -> Result<P, PacketRecvError> {

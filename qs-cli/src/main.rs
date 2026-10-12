@@ -26,7 +26,9 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+mod config;
 mod drop;
+mod password;
 
 #[derive(Parser, Debug)]
 #[clap(version = QS_PROTO_VERSION, author = env!("CARGO_PKG_AUTHORS"))]
@@ -145,6 +147,9 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
+    // TODO: build the endpoint from the config file (`config`) and the flags: relay mode
+    // (default, custom url, disabled) and the aws-lc-rs provider with the hybrid key exchange
+    // from `qs_core::crypto`. Today the relay mode and the provider are fixed here.
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::generate())
         .alpns(vec![QS_ALPN.to_vec()])
@@ -158,6 +163,10 @@ async fn main() -> color_eyre::Result<()> {
 
     match args.mode {
         Mode::Send { files } => {
+            // TODO: with a rendezvous url configured, do not print the ticket. Create a slot, show
+            // the short code (`qs_core::pairing::code`), and finish the pairing before connecting.
+            // The ticket below stays as `--direct` (`qs_core::direct`), and its encoding moves
+            // into qs-core. Ask for the optional password through `password` before pairing.
             // Wait until a relay is reachable, so the address is dialable from the internet.
             // Without a network this never happens, the local address is still printed then.
             if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
@@ -254,6 +263,9 @@ async fn main() -> color_eyre::Result<()> {
                     .interact()?,
             };
 
+            // TODO: accept a short code here as well as a ticket, tell them apart by length and
+            // format. Errors must separate wrong code, slot expired, slot already used and server
+            // unreachable. `--direct <ticket>` is the explicit form for the ticket.
             let invalid =
                 || AppError::QuicSendCore(QuicSendError::Receive(ReceiveError::InvalidCode));
             let ticket = BASE64_STANDARD_NO_PAD
@@ -329,6 +341,8 @@ fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
 }
 
 /// Show where each offered file/dir ends up, if that is not obvious
+// TODO: show a short fingerprint of the peer's `EndpointId` when accepting, so a
+// direct-mode user can compare it over another channel.
 fn print_destinations(offered: &[FilesAvailable], destinations: &[Destination]) {
     for (offered, destination) in offered.iter().zip(destinations) {
         let name = destination

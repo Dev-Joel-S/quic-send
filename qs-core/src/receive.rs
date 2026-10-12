@@ -277,6 +277,8 @@ impl Receiver {
             p => return Err(ReceiveError::UnexpectedDataPacket(p)),
         };
 
+        // TODO: apply `crate::limits` to the offer here, before anything is shown or accepted:
+        // number of entries, depth, total size, and enough free disk space at the destination.
         if let Err(e) = validate_offer(&files_offered) {
             send_packet(ReceiverToSender::RejectFiles, &self.conn).await?;
             self.wait_for_close().await;

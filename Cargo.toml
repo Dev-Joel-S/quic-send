@@ -2,6 +2,7 @@
 members = [
     "qs-core",
     "qs-cli",
+    "qs-rendezvous",
 ]
 
 resolver = "2"
