@@ -147,6 +147,8 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
+    // TODO: flags `--relay <default|disabled|url>` and `--port <n>`. With the relay disabled do
+    // not wait for one below (ONLINE_TIMEOUT), print the local addresses at once.
     // TODO: build the endpoint from the config file (`config`) and the flags: relay mode
     // (default, custom url, disabled) and the aws-lc-rs provider with the hybrid key exchange
     // from `qs_core::crypto`. Today the relay mode and the provider are fixed here.
