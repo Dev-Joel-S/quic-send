@@ -75,6 +75,8 @@ pub enum PairingError {
     Unknown,
     #[error("nobody entered the code in time")]
     NotClaimed,
+    #[error("the receiver gave up. The code is used up now, start again to get a new one")]
+    ReceiverGaveUp,
     #[error("the sender did not answer in time")]
     SenderGone,
     #[error("the rendezvous server {url} cannot be reached: {reason}")]
@@ -132,6 +134,7 @@ impl PairingError {
                 (Stage::Claiming, ErrorCode::SlotExpired) => Self::Expired,
                 (Stage::Claiming, ErrorCode::SlotUsed | ErrorCode::SlotClosed) => Self::Used,
                 (Stage::WaitingForReceiver, ErrorCode::SlotExpired) => Self::NotClaimed,
+                (Stage::WaitingForReceiver, ErrorCode::SlotClosed) => Self::ReceiverGaveUp,
                 (Stage::WaitingForSender, ErrorCode::SlotClosed) => Self::Rejected,
                 (Stage::WaitingForSender, ErrorCode::SlotExpired) => Self::SenderGone,
                 (_, code) => protocol(format!("{code:?}")),
@@ -705,6 +708,10 @@ mod tests {
         assert_eq!(
             at(Stage::WaitingForSender, ErrorCode::SlotClosed),
             PairingError::Rejected
+        );
+        assert_eq!(
+            at(Stage::WaitingForReceiver, ErrorCode::SlotClosed),
+            PairingError::ReceiverGaveUp
         );
         assert_eq!(
             at(Stage::WaitingForSender, ErrorCode::SlotExpired),

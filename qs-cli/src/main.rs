@@ -1,9 +1,14 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use config::{Config, NetworkArgs, RelaySetting, Settings};
-use iroh::SecretKey;
+use iroh::{Endpoint, EndpointAddr, SecretKey};
 use qs_core::{
     direct::Ticket,
+    pairing::{
+        code::{looks_like_code, Code},
+        rendezvous::Client,
+        Claim, Offer, PairingError, SlotHandle,
+    },
     receive::{Receiver, ReceiverArgs},
     send::{SendError, Sender, SenderArgs},
     QS_PROTO_VERSION,
@@ -15,6 +20,7 @@ use std::{
     process::ExitCode,
     rc::Rc,
     str::FromStr,
+    sync::Mutex,
     time::Duration,
 };
 use tracing::Level;
@@ -24,6 +30,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 use ui::CliProgressBars;
+use zeroize::Zeroizing;
 
 mod config;
 mod drop;
@@ -61,6 +68,11 @@ enum Mode {
         /// Print a ticket with address and key instead of using the rendezvous server
         #[clap(long)]
         direct: bool,
+
+        /// Protect the transfer with a password in addition to the code or ticket.
+        /// You are asked for it, it is never given on the command line
+        #[clap(long, short)]
+        password: bool,
     },
     #[clap(name = "receive", about = "Receive files", aliases = &["r"])]
     Receive {
@@ -76,12 +88,16 @@ enum Mode {
         #[clap(long, conflicts_with = "output")]
         here: bool,
 
-        /// The ticket of the sender
+        /// The code or ticket of the sender
         code: Option<String>,
 
         /// Automatically accept the files
         #[clap(long, short = 'y')]
         auto_accept: bool,
+
+        /// Ask for the password right away. Without this you are asked if the sender set one
+        #[clap(long, short)]
+        password: bool,
     },
     #[clap(
         name = "config",
@@ -92,6 +108,35 @@ enum Mode {
 
 /// An error to show to the user as it is, without a backtrace
 type Failure = Box<dyn std::error::Error>;
+
+/// The slot to give up if the user presses Ctrl+C while a pairing is under way
+static PENDING_SLOT: Mutex<Option<SlotHandle>> = Mutex::new(None);
+
+fn set_pending_slot(slot: Option<SlotHandle>) {
+    if let Ok(mut pending) = PENDING_SLOT.lock() {
+        *pending = slot;
+    }
+}
+
+/// Stop on Ctrl+C. A code that is still waiting is given up first, so the other side is
+/// told at once instead of waiting for it to expire.
+fn watch_ctrl_c() {
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+
+        let slot = PENDING_SLOT.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(slot) = slot {
+            let _ = tokio::time::timeout(Duration::from_secs(3), slot.cancel()).await;
+        }
+
+        // A prompt or progress bar may have hidden the cursor
+        let _ = console::Term::stderr().show_cursor();
+        eprintln!();
+        std::process::exit(130);
+    });
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -122,6 +167,7 @@ async fn main() -> ExitCode {
     }
 
     tracing::debug!("qs {}", QS_PROTO_VERSION);
+    watch_ctrl_c();
 
     match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -136,9 +182,13 @@ async fn run(args: Args) -> Result<(), Failure> {
     let (config, config_path) = Config::load(args.config.as_deref())?;
 
     match args.mode {
-        Mode::Send { files, direct } => {
+        Mode::Send {
+            files,
+            direct,
+            password,
+        } => {
             let settings = Settings::resolve(&args.network, None, config);
-            send(settings, files, direct).await
+            send(settings, files, direct, password).await
         }
         Mode::Receive {
             overwrite,
@@ -146,6 +196,7 @@ async fn run(args: Args) -> Result<(), Failure> {
             here,
             code,
             auto_accept,
+            password,
         } => {
             // Paths may have been dragged into the terminal
             let output = if here {
@@ -154,7 +205,7 @@ async fn run(args: Args) -> Result<(), Failure> {
                 output.map(drop::normalize_path_arg)
             };
             let settings = Settings::resolve(&args.network, output, config);
-            receive(settings, code, overwrite, auto_accept).await
+            receive(settings, code, overwrite, auto_accept, password).await
         }
         Mode::Config => {
             let settings = Settings::resolve(&args.network, None, config);
@@ -163,7 +214,21 @@ async fn run(args: Args) -> Result<(), Failure> {
     }
 }
 
-async fn send(settings: Settings, files: Vec<PathBuf>, _direct: bool) -> Result<(), Failure> {
+/// The client for the rendezvous server in `settings`, if one is set
+fn rendezvous(settings: &Settings, endpoint: &Endpoint) -> Result<Option<Client>, PairingError> {
+    settings
+        .rendezvous_url
+        .as_deref()
+        .map(|url| Client::new(url, endpoint.tls_config().clone()))
+        .transpose()
+}
+
+async fn send(
+    settings: Settings,
+    files: Vec<PathBuf>,
+    direct: bool,
+    password: bool,
+) -> Result<(), Failure> {
     // Paths may have been dragged into the terminal
     let mut files: Vec<PathBuf> = files.into_iter().map(drop::normalize_path_arg).collect();
 
@@ -184,46 +249,87 @@ async fn send(settings: Settings, files: Vec<PathBuf>, _direct: bool) -> Result<
         return Err(SendError::FileDoesNotExists(missing.clone()).into());
     }
 
+    let password = password.then(password::ask_new).transpose()?;
+
     let endpoint = net::bind(&settings, SecretKey::generate()).await?;
     let addr = net::own_addr(&endpoint, &settings.relay).await?;
 
-    // TODO: with a rendezvous url configured and without `--direct`, do not print the
-    // ticket. Create a slot, show the short code (`qs_core::pairing::code`), and finish the
-    // pairing before connecting. Ask for the optional password through `password` first.
-    let ticket = Ticket::new(addr)?;
-    let text = ticket.to_string();
+    // With a rendezvous server the receiver gets a short code, without one (or with
+    // `--direct`) a ticket that carries the address and the key itself.
+    let client = if direct {
+        None
+    } else {
+        rendezvous(&settings, &endpoint)?
+    };
 
     // On Linux the clipboard content is gone once this is dropped,
     // so it is kept alive until the transfer is over.
-    let clipboard = ui::copy_to_clipboard(&text);
+    let clipboard;
 
-    if clipboard.is_some() {
-        println!(
-            "Ticket (copied to your clipboard):\n\n{}\n",
-            text.bright_white()
-        );
-    } else {
-        println!("Ticket:\n\n{}\n", text.bright_white());
-    }
+    let sender_args = match client {
+        Some(client) => {
+            let offer = Offer::create(&client, password.as_deref().map(String::as_str)).await?;
+            set_pending_slot(Some(offer.handle()));
 
-    // Without a relay the plain addresses are all there is, and short enough to type
-    if settings.relay == RelaySetting::Disabled {
-        println!("or, typed by hand, one of:\n");
-        for line in ticket.typable() {
-            println!("{}", line.bright_white());
+            let code = offer.code().to_string();
+            clipboard = ui::copy_to_clipboard(&code);
+            print_secret("Code", &code, clipboard.is_some());
+            println!("on the other peer, run the following command:\n");
+            println!("{}\n", format!("qs receive {code}").yellow());
+            println!(
+                "{}",
+                format!(
+                    "The other peer needs the same rendezvous server ({}).",
+                    client.url()
+                )
+                .dimmed()
+            );
+            if password.is_some() {
+                println!("{}", "It will be asked for the password.".dimmed());
+            }
+            println!("\nThis device: {}", endpoint.id().fmt_short());
+
+            // Only the receiver that knew the code is let in
+            let peer = offer.wait_for_receiver(&addr).await?;
+            set_pending_slot(None);
+
+            SenderArgs {
+                files,
+                expected_peer: Some(peer),
+                // The password already went into the pairing
+                password: None,
+            }
         }
-        println!();
-    }
+        None => {
+            let ticket = Ticket::new(addr)?;
+            let text = ticket.to_string();
+            clipboard = ui::copy_to_clipboard(&text);
+            print_secret("Ticket", &text, clipboard.is_some());
 
-    println!("on the other peer, run the following command:\n");
-    println!("{}\n", "qs receive <ticket>".yellow());
-    println!("This device: {}", endpoint.id().fmt_short());
+            // Without a relay the plain addresses are all there is, and short enough to type
+            if settings.relay == RelaySetting::Disabled {
+                println!("or, typed by hand, one of:\n");
+                for line in ticket.typable() {
+                    println!("{}", line.bright_white());
+                }
+                println!();
+            }
 
-    let sender_args = SenderArgs {
-        files,
-        expected_peer: None,
-        password: None,
+            println!("on the other peer, run the following command:\n");
+            println!("{}\n", "qs receive <ticket>".yellow());
+            if password.is_some() {
+                println!("{}", "It will be asked for the password.".dimmed());
+            }
+            println!("This device: {}", endpoint.id().fmt_short());
+
+            SenderArgs {
+                files,
+                expected_peer: None,
+                password,
+            }
+        }
     };
+
     let mut sender = Sender::connect(endpoint, sender_args).await?;
     println!("Receiver:    {}", sender.remote_id().fmt_short());
 
@@ -264,11 +370,69 @@ async fn send(settings: Settings, files: Vec<PathBuf>, _direct: bool) -> Result<
     Ok(())
 }
 
+/// Show a code or ticket, and say whether it is on the clipboard
+fn print_secret(name: &str, text: &str, copied: bool) {
+    if copied {
+        println!(
+            "{name} (copied to your clipboard):\n\n{}\n",
+            text.bright_white()
+        );
+    } else {
+        println!("{name}:\n\n{}\n", text.bright_white());
+    }
+}
+
+/// Find the sender's address with a short code. Asks for the password if the sender
+/// set one and none was given yet.
+async fn pair(
+    settings: &Settings,
+    endpoint: &Endpoint,
+    input: &str,
+    password: Option<Zeroizing<String>>,
+) -> Result<EndpointAddr, Failure> {
+    let code: Code = input.parse()?;
+
+    let Some(client) = rendezvous(settings, endpoint)? else {
+        return Err(
+            "this looks like a short code, but no rendezvous server is set. \
+             Use --rendezvous <url> or `rendezvous_url` in the config file"
+                .into(),
+        );
+    };
+
+    let claim = Claim::new(&client, code).await?;
+    set_pending_slot(Some(claim.handle()));
+
+    let password = match (claim.password_required(), password) {
+        (true, None) => {
+            println!("The sender protected this transfer with a password.");
+            Some(password::ask()?)
+        }
+        (false, Some(_)) => {
+            if !password::confirm_without()? {
+                claim.handle().cancel().await;
+                set_pending_slot(None);
+                return Err(PairingError::UnexpectedPassword.into());
+            }
+            None
+        }
+        (_, password) => password,
+    };
+
+    let addr = claim
+        .complete(password.as_deref().map(String::as_str), endpoint.id())
+        .await?;
+    set_pending_slot(None);
+
+    Ok(addr)
+}
+
 async fn receive(
     settings: Settings,
     code: Option<String>,
     overwrite: bool,
     auto_accept: bool,
+    password: bool,
 ) -> Result<(), Failure> {
     let output = resolve_output_dir(settings.output_dir.clone())?;
     println!(
@@ -279,20 +443,39 @@ async fn receive(
     let input = match code {
         Some(code) => code,
         None => dialoguer::Input::new()
-            .with_prompt("Enter the ticket to connect")
+            .with_prompt("Enter the code or ticket of the sender")
             .interact()?,
     };
 
-    // TODO: accept a short code here as well as a ticket, tell them apart by length and
-    // format. Errors must separate wrong code, slot expired, slot already used and server
-    // unreachable.
-    let ticket = Ticket::from_str(&input)?;
+    let mut password = password.then(password::ask).transpose()?;
 
     let endpoint = net::bind(&settings, SecretKey::generate()).await?;
     println!("This device: {}", endpoint.id().fmt_short());
 
-    let receiver_args = ReceiverArgs { resume: !overwrite };
-    let mut receiver = Receiver::connect(endpoint, ticket.into_addr(), receiver_args).await?;
+    let receiver_args = || ReceiverArgs { resume: !overwrite };
+
+    let mut receiver = if looks_like_code(&input) {
+        // The password goes into the pairing, the connection needs none after that
+        let addr = pair(&settings, &endpoint, &input, password.take()).await?;
+        Receiver::connect(endpoint, addr, receiver_args()).await?
+    } else {
+        let addr = Ticket::from_str(&input)?.into_addr();
+        let mut receiver = Receiver::connect(endpoint, addr.clone(), receiver_args()).await?;
+
+        // The sender only waits a moment for the password. If it has to be asked for
+        // first, hang up, ask, and come back with it.
+        if receiver.password_required() && password.is_none() {
+            let endpoint = receiver.disconnect().await;
+            println!("The sender protected this transfer with a password.");
+            password = Some(password::ask()?);
+            receiver = Receiver::connect(endpoint, addr, receiver_args()).await?;
+        }
+
+        receiver
+            .authenticate(password.as_deref().map(String::as_str))
+            .await?;
+        receiver
+    };
     println!("Sender:      {}", receiver.remote_id().fmt_short());
 
     // Give iroh some time to switch the connection to direct

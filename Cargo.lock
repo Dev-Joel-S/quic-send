@@ -2887,6 +2887,7 @@ dependencies = [
  "arboard",
  "clap",
  "colored",
+ "console",
  "dialoguer",
  "dirs",
  "indicatif",
@@ -2900,6 +2901,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

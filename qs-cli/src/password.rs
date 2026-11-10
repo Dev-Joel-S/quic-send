@@ -1,13 +1,58 @@
 //! Prompt for the optional password.
 //!
-//! The password is mixed into the PAKE on top of the code. It is never accepted as a
-//! command line argument or an environment variable, because both show up in the
-//! process list and the shell history.
+//! The password is an addition to the code or ticket, never a replacement. It is never
+//! accepted as a command line argument or an environment variable, because both show up
+//! in the process list and the shell history.
 //!
-//! TODO: prompt without echo (dialoguer has `Password`), ask twice when sending.
-//! TODO: normalize to Unicode NFC before it is handed to `qs_core::pairing`.
-//! TODO: `--password` is a flag without a value that only turns the prompt on.
-//! TODO: not a terminal on stdin: fail with a clear message instead of reading it from
-//!       a pipe by accident.
-//! TODO: tell the user if the other side used no password and the pairing failed
-//!       because of it, if the protocol can tell that apart from a wrong code.
+//! DONE: prompted without echo, the sender types it twice ([ask_new]).
+//! DONE: normalized to Unicode NFC in `qs_core`, where it goes into the key exchange.
+//! DONE: `--password` is a flag without a value that only turns the prompt on.
+//! DONE: without a terminal the prompt fails with a clear message instead of reading the
+//!       password from a pipe by accident.
+//! DONE: the receiver is asked on its own when the sender set a password and the flag was
+//!       not given, and is told when it gave one although the sender set none.
+
+use std::io::{self, IsTerminal};
+use zeroize::Zeroizing;
+
+fn require_terminal() -> io::Result<()> {
+    if io::stdin().is_terminal() {
+        return Ok(());
+    }
+    Err(io::Error::other(
+        "a password can only be entered in a terminal, not through a pipe",
+    ))
+}
+
+/// Ask for a new password, twice
+pub fn ask_new() -> io::Result<Zeroizing<String>> {
+    require_terminal()?;
+    dialoguer::Password::new()
+        .with_prompt("Password for this transfer")
+        .with_confirmation("Repeat the password", "The passwords do not match")
+        .interact()
+        .map(Zeroizing::new)
+        .map_err(io::Error::other)
+}
+
+/// Ask for the password the sender set
+pub fn ask() -> io::Result<Zeroizing<String>> {
+    require_terminal()?;
+    dialoguer::Password::new()
+        .with_prompt("Password")
+        .interact()
+        .map(Zeroizing::new)
+        .map_err(io::Error::other)
+}
+
+/// Ask whether to go on without the password that was given but is not needed
+pub fn confirm_without() -> io::Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    dialoguer::Confirm::new()
+        .with_prompt("The sender did not set a password. Receive without one?")
+        .default(false)
+        .interact()
+        .map_err(io::Error::other)
+}

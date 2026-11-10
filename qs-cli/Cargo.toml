@@ -11,7 +11,8 @@ keywords = ["quic", "file-transfer", "peer-to-peer"]
 
 [dependencies]
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+zeroize = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 iroh = { workspace = true }
@@ -21,6 +22,7 @@ qs-core = { workspace = true }
 clap = { version = "4.6", features = ["derive"] }
 indicatif = "0.18"
 dialoguer = "0.12"
+console = "0.16"
 colored = "3.1"
 dirs = "7"
 toml = "1.2"

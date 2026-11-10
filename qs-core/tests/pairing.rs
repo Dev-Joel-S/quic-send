@@ -264,7 +264,7 @@ async fn giving_up_tells_the_other_side() {
     let waited = tokio::time::timeout(Duration::from_secs(10), offer.wait_for_receiver(&send_addr))
         .await
         .expect("the sender must notice that the receiver gave up");
-    assert!(waited.is_err());
+    assert_eq!(waited, Err(PairingError::ReceiverGaveUp));
 }
 
 #[tokio::test(flavor = "multi_thread")]
