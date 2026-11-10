@@ -19,7 +19,13 @@
 //! DONE: `GET` requests wait up to 25 seconds for a message (long polling).
 //! DONE: nothing is logged per slot, so slot names never end up next to IP addresses.
 //! DONE: tests in `tests/server.rs`, including clients that behave badly.
-//! TODO: TLS is the job of a reverse proxy. Document an example configuration in the README.
+//! DONE: TLS is the job of a reverse proxy, the README has an example configuration and
+//!       `packaging/qs-rendezvous.service` an example systemd unit.
+//! DONE: tokens are compared in constant time ([same_token]).
+//! TODO (decision, audit finding M3): anyone who can reach the server can use up codes by
+//!       claiming their slots. That follows from one claim per slot, which is what limits
+//!       guessing, and from only 1024 nameplates. Options: a 3 + 5 split of the code,
+//!       stricter limits per address, or a server that only known users can reach.
 
 use axum::{
     extract::{rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Path, Query, State},

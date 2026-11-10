@@ -13,8 +13,10 @@ pub mod receive;
 pub mod send;
 
 pub const BUF_SIZE: usize = 8192;
-// TODO: bump the protocol version and the ALPN below whenever the handshake or the
-//       packets change, the pairing work will do that.
+// 0.5.0 was never released, so every change to the handshake and the packets so far is
+// part of it.
+// TODO: from the first release on, bump the protocol version and the ALPN below whenever
+//       the handshake or the packets change.
 pub const QS_PROTO_VERSION: &str = "0.5.0";
 pub const QS_ALPN: &[u8] = b"quic-send/0.5.0";
 

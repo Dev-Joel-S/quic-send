@@ -18,7 +18,7 @@
 //!       CLI prints every usable address when no relay is in use.
 //! DONE: with the optional password a PAKE runs inside the QUIC connection, bound to it
 //!       with the exporter value, see `crate::password`.
-//! TODO: README section that says clearly: without a relay the sender must be reachable
+//! DONE: the README says clearly that without a relay the sender must be reachable
 //!       by the receiver (same network, a forwarded port, or a public IP).
 
 use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};

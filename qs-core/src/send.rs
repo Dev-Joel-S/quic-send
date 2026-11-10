@@ -216,7 +216,11 @@ pub struct SenderArgs {
     pub announce: Option<EndpointAddr>,
 }
 
-/// How long a receiver has to answer the connection request and the password exchange
+/// How long a receiver has to answer the connection request and the password exchange.
+///
+/// TODO (audit finding N6): receivers are greeted one after the other, so with a plain
+/// ticket anyone who has it can keep the sender busy for this long per connection. Greet
+/// several at once, the first one that gets through wins.
 const GREETING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a receiver has to read that its password was wrong

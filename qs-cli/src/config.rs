@@ -26,7 +26,9 @@
 //! DONE: the file is never written by qs, and no password or secret key belongs in it.
 //! DONE: the relay mode and the Downloads lookup in `main.rs` use the values from here.
 //! DONE: `output_dir = "."` means the directory qs is started in, like `-o .` and `--here`.
-//! TODO: `known_peers` is read and shown, but not used to connect yet, see `qs_core::peers`.
+//! DONE: `known_peers` entries are used by `--to` and `--from`, next to the peers saved
+//!       with `--save-peer` (see `peers.rs`). They only carry an id, so sending to one needs
+//!       an own relay that both sides use.
 
 use iroh::RelayUrl;
 use serde::Deserialize;

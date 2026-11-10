@@ -1,0 +1,31 @@
+# Example systemd unit for the quic-send rendezvous server.
+#
+# Copy to /etc/systemd/system/qs-rendezvous.service, put the binary in /usr/local/bin,
+# then: systemctl daemon-reload && systemctl enable --now qs-rendezvous
+#
+# The server listens on localhost only. Put a reverse proxy with TLS in front of it.
+# Remove --behind-proxy if clients reach the server directly.
+
+[Unit]
+Description=quic-send rendezvous server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/qs-rendezvous --listen 127.0.0.1:8080 --behind-proxy
+Restart=on-failure
+
+# The server needs no files, no privileges and no home directory
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

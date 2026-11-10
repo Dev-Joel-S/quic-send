@@ -16,6 +16,10 @@
 //! DONE: tests: same input gives the same key, another code or password does not, a
 //!       message of the wrong side or a damaged one is refused.
 //! TODO: the `spake2` crate does not wipe its own state. Report or patch upstream.
+//! TODO (decision, audit finding M4): the `spake2` crate has never had an independent
+//!       audit, which the project asks for. The security of a pairing against a server in
+//!       the middle rests on it. Either accept that knowingly, or replace it once an
+//!       audited PAKE that fits exists.
 
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use thiserror::Error;

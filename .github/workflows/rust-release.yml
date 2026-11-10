@@ -30,14 +30,15 @@ jobs:
           cargo install cargo-deb --locked
 
       - name: Build
-        run: cargo build --release --locked -p qs-cli --target x86_64-unknown-linux-musl
+        run: cargo build --release --locked -p qs-cli -p qs-rendezvous --target x86_64-unknown-linux-musl
 
       - name: Package
         shell: bash
         run: |
           version=$(cargo pkgid -p qs-cli | sed 's/.*[#@]//')
           mkdir -p dist "qs-$version-x86_64-linux"
-          cp target/x86_64-unknown-linux-musl/release/qs README.md LICENSE "qs-$version-x86_64-linux/"
+          cp target/x86_64-unknown-linux-musl/release/{qs,qs-rendezvous} README.md LICENSE "qs-$version-x86_64-linux/"
+          cp packaging/qs-rendezvous.service "qs-$version-x86_64-linux/"
           tar czf "dist/qs-$version-x86_64-linux.tar.gz" "qs-$version-x86_64-linux"
           cargo deb -p qs-cli --target x86_64-unknown-linux-musl --no-build --output dist/
 

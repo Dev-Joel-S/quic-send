@@ -25,6 +25,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// The alphabet of codes and nameplates: Crockford Base32, without I, L, O and U
 pub const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Characters of a nameplate. With the alphabet above that is 1024 slots at once.
+/// Changing this also means changing `SECRET_LEN` in `qs_core::pairing::code`, the two
+/// add up to the length of a code.
 pub const NAMEPLATE_LEN: usize = 2;
 /// Largest message a slot stores, before base64
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
