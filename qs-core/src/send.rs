@@ -216,11 +216,7 @@ pub struct SenderArgs {
     pub announce: Option<EndpointAddr>,
 }
 
-/// How long a receiver has to answer the connection request and the password exchange.
-///
-/// TODO (audit finding N6): receivers are greeted one after the other, so with a plain
-/// ticket anyone who has it can keep the sender busy for this long per connection. Greet
-/// several at once, the first one that gets through wins.
+/// How long a receiver has to answer the connection request and the password exchange
 const GREETING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a receiver has to read that its password was wrong
@@ -230,11 +226,98 @@ const REJECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// quick. Whoever takes longer is dropped, or one silent peer could keep everyone else out.
 async fn greet_in_time(
     conn: &iroh::endpoint::Connection,
-    args: &SenderArgs,
+    hello: &Hello,
 ) -> Result<(Greeting, Option<EndpointAddr>), SendError> {
-    tokio::time::timeout(GREETING_TIMEOUT, greet(conn, args))
+    tokio::time::timeout(GREETING_TIMEOUT, greet(conn, hello))
         .await
         .unwrap_or_else(|_| Err(SendError::Connect("the receiver did not answer".into())))
+}
+
+/// What a sender needs to say hello to whoever connects
+struct Hello {
+    expected_peer: Option<iroh::EndpointId>,
+    password: Option<Zeroizing<String>>,
+    announce: Option<EndpointAddr>,
+}
+
+impl Hello {
+    fn new(args: &SenderArgs) -> Self {
+        Self {
+            expected_peer: args.expected_peer,
+            password: args.password.clone(),
+            announce: args.announce.clone(),
+        }
+    }
+}
+
+/// Most peers that may be saying hello at the same time, more are refused
+const MAX_PENDING: usize = 16;
+
+/// How the attempt of one peer to become the receiver ended
+enum Attempt {
+    /// This is the receiver, with the identity it announced
+    Welcome(iroh::endpoint::Connection, Option<EndpointAddr>),
+    WrongPassword,
+    /// A receiver that cannot work with this sender. That is most likely the one the
+    /// user is waiting for, so the user is told instead of waiting on.
+    Incompatible(SendError),
+    /// Not a receiver: a broken connection, a stranger, or somebody who said nothing
+    Dropped,
+}
+
+/// Take one incoming connection as far as it gets. Runs in a task of its own, so a peer
+/// that is slow or silent only holds up itself.
+async fn attempt(incoming: iroh::endpoint::Incoming, hello: std::sync::Arc<Hello>) -> Attempt {
+    // A broken or hostile connection attempt must not end the wait for the receiver
+    let conn = match incoming.accept() {
+        Ok(accepting) => match accepting.await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::debug!("incoming connection failed: {e}");
+                return Attempt::Dropped;
+            }
+        },
+        Err(e) => {
+            tracing::debug!("incoming connection failed: {e}");
+            return Attempt::Dropped;
+        }
+    };
+
+    if let Err(e) = ensure_post_quantum(&conn) {
+        tracing::warn!("refused a connection: {e}");
+        conn.close(2u32.into(), b"post-quantum key exchange required");
+        return Attempt::Dropped;
+    }
+
+    if let Some(expected) = hello.expected_peer {
+        if conn.remote_id() != expected {
+            tracing::warn!(
+                "refused a connection from {}, expected {}",
+                conn.remote_id().fmt_short(),
+                expected.fmt_short()
+            );
+            conn.close(1u32.into(), b"unexpected peer");
+            return Attempt::Dropped;
+        }
+    }
+
+    match greet_in_time(&conn, &hello).await {
+        Ok((Greeting::Welcome, identity)) => Attempt::Welcome(conn, identity),
+        Ok((Greeting::WrongPassword, _)) => {
+            // Give the receiver a moment to read the rejection, it hangs up then.
+            // Closing right away could drop the packet that tells it why.
+            let _ = tokio::time::timeout(REJECTION_GRACE, conn.closed()).await;
+            conn.close(3u32.into(), b"wrong password");
+            Attempt::WrongPassword
+        }
+        Err(e @ (SendError::WrongVersion(..) | SendError::Password(_))) => Attempt::Incompatible(e),
+        // The connection broke while saying hello, somebody else may still come
+        Err(e) => {
+            tracing::debug!("lost a receiver before the transfer: {e}");
+            conn.close(4u32.into(), b"no answer");
+            Attempt::Dropped
+        }
+    }
 }
 
 /// How saying hello to a receiver went
@@ -247,15 +330,15 @@ enum Greeting {
 /// Returns how it went and the identity the receiver announced.
 async fn greet(
     conn: &iroh::endpoint::Connection,
-    args: &SenderArgs,
+    hello: &Hello,
 ) -> Result<(Greeting, Option<EndpointAddr>), SendError> {
-    let password = args.password.as_deref().map(String::as_str);
+    let password = hello.password.as_deref().map(String::as_str);
 
     send_packet(
         SenderToReceiver::ConnRequest {
             version_num: QS_PROTO_VERSION.to_string(),
             password: password.is_some(),
-            identity: args.announce.clone(),
+            identity: hello.announce.clone(),
         },
         conn,
     )
@@ -309,73 +392,50 @@ impl Sender {
         this_endpoint: iroh::Endpoint,
         args: SenderArgs,
     ) -> Result<Self, SendError> {
+        let hello = std::sync::Arc::new(Hello::new(&args));
+        let mut attempts = tokio::task::JoinSet::new();
         let mut wrong_passwords = 0;
 
+        // Everyone who connects says hello at the same time. The first one that gets
+        // through is the receiver. Taking them one after the other would let a single
+        // silent peer keep the real receiver waiting.
         let (conn, peer_identity) = loop {
-            let Some(incoming) = this_endpoint.accept().await else {
-                return Err(SendError::Connect("the endpoint was closed".to_string()));
-            };
-
-            // A broken or hostile connection attempt must not end the wait for the receiver
-            let conn = match incoming.accept() {
-                Ok(accepting) => match accepting.await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::debug!("incoming connection failed: {e}");
-                        continue;
+            tokio::select! {
+                incoming = this_endpoint.accept() => {
+                    let Some(incoming) = incoming else {
+                        return Err(SendError::Connect("the endpoint was closed".to_string()));
+                    };
+                    if attempts.len() >= MAX_PENDING {
+                        incoming.refuse();
+                    } else {
+                        attempts.spawn(attempt(incoming, hello.clone()));
                     }
-                },
-                Err(e) => {
-                    tracing::debug!("incoming connection failed: {e}");
-                    continue;
                 }
-            };
-
-            if let Err(e) = ensure_post_quantum(&conn) {
-                tracing::warn!("refused a connection: {e}");
-                conn.close(2u32.into(), b"post-quantum key exchange required");
-                continue;
-            }
-
-            if let Some(expected) = args.expected_peer {
-                if conn.remote_id() != expected {
-                    tracing::warn!(
-                        "refused a connection from {}, expected {}",
-                        conn.remote_id().fmt_short(),
-                        expected.fmt_short()
-                    );
-                    conn.close(1u32.into(), b"unexpected peer");
-                    continue;
-                }
-            }
-
-            match greet_in_time(&conn, &args).await {
-                Ok((Greeting::Welcome, identity)) => break (conn, identity),
-                Ok((Greeting::WrongPassword, _)) => {
-                    // Give the receiver a moment to read the rejection, it hangs up then.
-                    // Closing right away could drop the packet that tells it why.
-                    let _ = tokio::time::timeout(REJECTION_GRACE, conn.closed()).await;
-                    conn.close(3u32.into(), b"wrong password");
-                    wrong_passwords += 1;
-                    if wrong_passwords >= MAX_ATTEMPTS {
-                        this_endpoint.close().await;
-                        return Err(PasswordError::TooManyAttempts.into());
+                Some(finished) = attempts.join_next(), if !attempts.is_empty() => {
+                    match finished {
+                        Ok(Attempt::Welcome(conn, identity)) => break (conn, identity),
+                        Ok(Attempt::WrongPassword) => {
+                            wrong_passwords += 1;
+                            if wrong_passwords >= MAX_ATTEMPTS {
+                                attempts.shutdown().await;
+                                this_endpoint.close().await;
+                                return Err(PasswordError::TooManyAttempts.into());
+                            }
+                            tracing::warn!("a receiver used a wrong password");
+                        }
+                        Ok(Attempt::Incompatible(e)) => {
+                            attempts.shutdown().await;
+                            this_endpoint.close().await;
+                            return Err(e);
+                        }
+                        Ok(Attempt::Dropped) | Err(_) => {}
                     }
-                    tracing::warn!("a receiver used a wrong password");
-                }
-                // A receiver that cannot work with this sender. That is most likely the
-                // one the user is waiting for, so tell them instead of waiting on.
-                Err(e @ (SendError::WrongVersion(..) | SendError::Password(_))) => {
-                    this_endpoint.close().await;
-                    return Err(e);
-                }
-                // The connection broke while saying hello, somebody else may still come
-                Err(e) => {
-                    tracing::debug!("lost a receiver before the transfer: {e}");
-                    conn.close(4u32.into(), b"no answer");
                 }
             }
         };
+
+        // Everyone who is still saying hello is too late
+        attempts.shutdown().await;
 
         // One receiver per transfer: everybody else is refused from here on
         let refuse_others = refuse_everyone(&this_endpoint);
@@ -412,7 +472,7 @@ impl Sender {
             return Err(e.into());
         }
 
-        let peer_identity = match greet_in_time(&conn, &args).await {
+        let peer_identity = match greet_in_time(&conn, &Hello::new(&args)).await {
             Ok((Greeting::Welcome, identity)) => identity,
             Ok((Greeting::WrongPassword, _)) => {
                 let _ = tokio::time::timeout(REJECTION_GRACE, conn.closed()).await;

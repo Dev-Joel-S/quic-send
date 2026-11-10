@@ -850,18 +850,28 @@ async fn silent_peer_does_not_keep_the_receiver_out() {
     let silent = endpoint().await;
     let silent_conn = silent.connect(addr.clone(), QS_ALPN).await.unwrap();
 
-    // The real receiver gets its turn once the sender has given up on the silent one
+    // The real receiver does not have to wait for the sender to give up on the silent
+    // one: everyone who connects is dealt with at the same time
+    let started = std::time::Instant::now();
     let received = tokio::time::timeout(
         Duration::from_secs(40),
         receive_with_password(addr, out.path(), None),
     )
     .await
-    .expect("the sender must not wait for a silent peer forever");
+    .expect("the sender must not wait for a silent peer");
     assert!(received.unwrap());
     assert!(send.await.unwrap().unwrap());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
 
-    assert!(silent_conn.close_reason().is_some());
+    // The silent one is hung up on once the receiver is in
+    tokio::time::timeout(Duration::from_secs(10), silent_conn.closed())
+        .await
+        .expect("the silent peer must be dropped");
 }
 
 /// A sender that dials `addr` with one small file
@@ -1120,4 +1130,37 @@ async fn overwriting_a_real_folder_still_works() {
         std::fs::read(out.path().join("dir/sub/keep.txt")).unwrap(),
         b"kept"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn many_silent_peers_do_not_keep_the_receiver_out() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (data, addr, send) = password_sender(src.path(), Some("hunter2")).await;
+
+    // More silent connections than the sender deals with at once
+    let mut silent = Vec::new();
+    for _ in 0..20 {
+        let endpoint = endpoint().await;
+        // Past the limit the sender refuses, which is fine here
+        if let Ok(conn) = endpoint.connect(addr.clone(), QS_ALPN).await {
+            silent.push((endpoint, conn));
+        }
+    }
+
+    // Slots free up as the silent ones time out, the receiver gets in then at the latest
+    let received = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match receive_with_password(addr.clone(), out.path(), Some("hunter2")).await {
+                Ok(received) => break received,
+                Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+    })
+    .await
+    .expect("the receiver must get in");
+
+    assert!(received);
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
 }
