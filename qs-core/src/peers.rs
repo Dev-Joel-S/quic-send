@@ -22,6 +22,8 @@
 //!       peer does the same (`receive::Receiver::accept`).
 //! DONE: tests: alias lookup, unknown alias, a changed key for a known alias is a loud
 //!       error and not silently replaced, the identity survives a restart.
+//! TODO: on Windows the identity file gets no access rights of its own, it relies on the
+//!       user profile being private. The key is stored without a passphrase.
 //! TODO: a receiver that keeps listening for several transfers (a daemon for a homelab).
 //! TODO: address lookup for a peer whose relay or address changed.
 
@@ -35,6 +37,7 @@ use std::{
     str::FromStr,
 };
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// File with the secret key of the stable identity
 const IDENTITY_FILE: &str = "identity.key";
@@ -107,14 +110,18 @@ pub fn load_or_create_identity(dir: &Path) -> Result<SecretKey, PeerError> {
     let path = dir.join(IDENTITY_FILE);
 
     match std::fs::read_to_string(&path) {
-        Ok(text) => SecretKey::from_str(text.trim()).map_err(|_| PeerError::DamagedIdentity(path)),
+        Ok(text) => {
+            let text = Zeroizing::new(text);
+            SecretKey::from_str(text.trim()).map_err(|_| PeerError::DamagedIdentity(path))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let key = SecretKey::generate();
-            let text = key
-                .to_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
+            // The copies made for writing are wiped, the key itself wipes on drop
+            let bytes = Zeroizing::new(key.to_bytes());
+            let mut text = Zeroizing::new(String::with_capacity(bytes.len() * 2));
+            for byte in bytes.iter() {
+                text.push_str(&format!("{byte:02x}"));
+            }
             write_private(&path, text.as_bytes()).map_err(io_error(&path))?;
             Ok(key)
         }
