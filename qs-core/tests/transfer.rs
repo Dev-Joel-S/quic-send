@@ -1038,3 +1038,86 @@ async fn announced_identity_has_to_be_the_own_one() {
     // The receiver announced nothing
     assert_eq!(send.await.unwrap().unwrap().0, None);
 }
+
+/// Receive `files` into `output`, overwriting what is there
+async fn overwrite(files: Vec<PathBuf>, output: &Path) -> Outcome {
+    transfer(files, output, true, None).await
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn link_to_a_directory_is_not_followed() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    // The receiver already has `dir` with a link in it that leads out of `dir`.
+    // The sender offers a real directory of the same name with a file in it.
+    write(&src.path().join("dir/link/planted.txt"), b"from the sender");
+    std::fs::create_dir(out.path().join("dir")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), out.path().join("dir/link")).unwrap();
+
+    let outcome = overwrite(vec![src.path().join("dir")], out.path()).await;
+
+    let error = outcome.receive.unwrap_err().to_string();
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(listing(elsewhere.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn link_as_destination_is_not_followed() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    write(&src.path().join("dir/planted.txt"), b"from the sender");
+    std::os::unix::fs::symlink(elsewhere.path(), out.path().join("dir")).unwrap();
+
+    let outcome = overwrite(vec![src.path().join("dir")], out.path()).await;
+
+    assert!(outcome.receive.is_err());
+    assert!(listing(elsewhere.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn link_as_part_file_is_not_followed() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    // A link where the incomplete file would be written must not be written through
+    let target = elsewhere.path().join("precious.txt");
+    std::fs::write(&target, b"keep me").unwrap();
+    write(&src.path().join("file.bin"), &content(14, 1000));
+    std::os::unix::fs::symlink(&target, out.path().join("file.bin.part")).unwrap();
+
+    let outcome = overwrite(vec![src.path().join("file.bin")], out.path()).await;
+
+    assert!(outcome.receive.is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overwriting_a_real_folder_still_works() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+
+    let data = content(15, 5000);
+    write(&src.path().join("dir/sub/a.bin"), &data);
+    write(&out.path().join("dir/sub/a.bin"), b"old");
+    write(&out.path().join("dir/sub/keep.txt"), b"kept");
+
+    let outcome = overwrite(vec![src.path().join("dir")], out.path()).await;
+
+    assert!(outcome.receive.unwrap());
+    assert_eq!(
+        std::fs::read(out.path().join("dir/sub/a.bin")).unwrap(),
+        data
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("dir/sub/keep.txt")).unwrap(),
+        b"kept"
+    );
+}

@@ -5,8 +5,8 @@ use crate::{
     },
     crypto::{ensure_post_quantum, CryptoError},
     destination::{
-        local_name, local_progress, part_path, resolve, validate_offer, Destination, NameError,
-        Placement, ResumeState,
+        local_name, local_progress, part_path, refuse_symlink, resolve, validate_offer,
+        Destination, NameError, Placement, ResumeState,
     },
     limits::{check_offer, check_space, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
@@ -89,12 +89,14 @@ where
     match entry {
         FileSendRecvTree::File { skip, size, .. } => {
             let part = part_path(path);
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&part)
-                .await?;
+            // A link at this place would send the data somewhere else
+            refuse_symlink(&part)?;
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            // Also refused by the system if a link appears between the check and here
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NOFOLLOW);
+            let mut file = options.open(&part).await?;
             // Anything past the resume point is not trusted
             file.set_len(*skip).await?;
 
@@ -119,7 +121,22 @@ where
             Ok(complete)
         }
         FileSendRecvTree::Dir { files, .. } => {
-            tokio::fs::create_dir_all(path).await?;
+            // Only a real directory is entered. A link to a directory elsewhere, left in a
+            // folder that is overwritten or resumed, would lead out of the destination.
+            match tokio::fs::symlink_metadata(path).await {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    refuse_symlink(path)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("{} exists and is not a directory", path.display()),
+                    ));
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    tokio::fs::create_dir(path).await?;
+                }
+                Err(e) => return Err(e),
+            }
 
             for file in files {
                 let child = path.join(local_name(file.name()).map_err(io::Error::other)?);

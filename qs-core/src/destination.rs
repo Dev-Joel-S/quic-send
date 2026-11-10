@@ -216,11 +216,12 @@ impl ResumeState {
         let path = state_path(destination);
         let data = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
 
-        // A hidden file can only be replaced with matching attributes on Windows
+        // Start from nothing: a hidden file can only be replaced with matching attributes
+        // on Windows, and whatever is at this place, a link included, is not written into
         let _ = std::fs::remove_file(&path);
 
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
@@ -317,6 +318,23 @@ pub fn resolve(
 /// Exists, also as a dangling symlink
 fn exists(path: &Path) -> bool {
     path.symlink_metadata().is_ok()
+}
+
+/// Fail if `path` is a symbolic link.
+///
+/// Received data is never written through a link: the sender chooses the names, and a
+/// link that is already in the destination would let it reach files outside of it.
+pub fn refuse_symlink(path: &Path) -> io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write through the symbolic link {}",
+                path.display()
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// What of `offer` is already on disk at `destination`, as the files to skip.
