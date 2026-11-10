@@ -9,6 +9,7 @@ use colored::Colorize;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
 use qs_core::peers::{load_or_create_identity, KnownPeer, PeerError, PeerStore};
 use std::{
+    io::IsTerminal,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -59,8 +60,50 @@ pub fn address(dir: &Path, settings: &Settings, alias: &str) -> Result<EndpointA
     Ok(addr)
 }
 
-/// Save the peer of this transfer as `alias`, if it told where to find it again
-pub fn remember(dir: &Path, alias: &str, peer: Option<&EndpointAddr>) -> Result<(), Failure> {
+/// A fingerprint of `id` that is long enough to compare by eye: `07f4-a0d8-aa35-b216`
+pub fn fingerprint(id: &EndpointId) -> String {
+    let hex = id.to_string();
+    let groups: Vec<&str> = (0..4).map(|i| &hex[i * 4..i * 4 + 4]).collect();
+    groups.join("-")
+}
+
+/// Ask whether to save a peer that nothing has vouched for.
+///
+/// With a plain ticket the receiver is whoever had the ticket first. Saving it would
+/// turn a ticket that leaked once into a peer that is trusted from then on, so the user
+/// has to compare the fingerprint and say yes.
+fn confirm_unverified(alias: &str, id: &EndpointId) -> Result<bool, Failure> {
+    eprintln!(
+        "{} this receiver was not checked by a code or a password. \
+         Anyone who got hold of the ticket could be it.",
+        "warning:".yellow().bold()
+    );
+    println!(
+        "Its fingerprint is {}. Compare it with `This device` on the other side.",
+        fingerprint(id).bright_white()
+    );
+
+    if !std::io::stdin().is_terminal() {
+        println!("Not saved: this has to be confirmed in a terminal.");
+        return Ok(false);
+    }
+
+    Ok(dialoguer::Confirm::new()
+        .with_prompt(format!("Is it the same, save it as {alias}?"))
+        .default(false)
+        .interact()?)
+}
+
+/// Save the peer of this transfer as `alias`, if it told where to find it again.
+///
+/// `verified` says whether something vouches for the peer: the code, a password, or
+/// the key in the ticket it was dialed with.
+pub fn remember(
+    dir: &Path,
+    alias: &str,
+    peer: Option<&EndpointAddr>,
+    verified: bool,
+) -> Result<(), Failure> {
     let Some(peer) = peer else {
         eprintln!(
             "{} the other side did not use --save-peer, so it has no identity that \
@@ -69,6 +112,11 @@ pub fn remember(dir: &Path, alias: &str, peer: Option<&EndpointAddr>) -> Result<
         );
         return Ok(());
     };
+
+    if !verified && !confirm_unverified(alias, &peer.id)? {
+        println!("Not saved.");
+        return Ok(());
+    }
 
     let mut store = PeerStore::load(dir)?;
     store.save(alias, KnownPeer::from(peer))?;

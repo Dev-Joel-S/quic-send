@@ -301,11 +301,22 @@ impl PeerOptions {
         self.dir.is_some().then(|| addr.clone())
     }
 
-    /// Save the other side if that was asked for
-    fn remember(&self, peer: Option<&EndpointAddr>) -> Result<(), Failure> {
+    /// Save the other side if that was asked for. `verified` says whether a code, a
+    /// password or the key of a ticket vouches for it.
+    fn remember(&self, peer: Option<&EndpointAddr>, verified: bool) -> Result<(), Failure> {
         match (&self.save_as, &self.dir) {
-            (Some(alias), Some(dir)) => peers::remember(dir, alias, peer),
+            (Some(alias), Some(dir)) => peers::remember(dir, alias, peer, verified),
             _ => Ok(()),
+        }
+    }
+
+    /// How this device shows itself. When a peer is to be saved the fingerprint is
+    /// longer, so the two sides can compare it.
+    fn device(&self, id: &iroh::EndpointId) -> String {
+        if self.save_as.is_some() {
+            peers::fingerprint(id)
+        } else {
+            id.fmt_short().to_string()
         }
     }
 }
@@ -355,7 +366,7 @@ async fn send(
     // A saved peer is dialed, it waits for this device and nobody else
     if let (Some(alias), Some(dir)) = (&peers.known, &peers.dir) {
         let peer = peers::address(dir, &settings, alias)?;
-        println!("This device: {}", endpoint.id().fmt_short());
+        println!("This device: {}", peers.device(&endpoint.id()));
         println!("Connecting to {} ({})...", alias, peer.id.fmt_short());
 
         let sender_args = SenderArgs {
@@ -373,7 +384,8 @@ async fn send(
                      and both sides have to have saved each other."
                 )
             })?;
-        return send_to(sender, &peers).await;
+        // The receiver is the saved peer, the connection would not exist otherwise
+        return send_to(sender, &peers, true).await;
     }
 
     // With a rendezvous server the receiver gets a short code, without one (or with
@@ -409,7 +421,7 @@ async fn send(
             if password.is_some() {
                 println!("{}", "It will be asked for the password.".dimmed());
             }
-            println!("\nThis device: {}", endpoint.id().fmt_short());
+            println!("\nThis device: {}", peers.device(&endpoint.id()));
 
             // Only the receiver that knew the code is let in
             let peer = offer.wait_for_receiver(&addr).await?;
@@ -443,7 +455,7 @@ async fn send(
             if password.is_some() {
                 println!("{}", "It will be asked for the password.".dimmed());
             }
-            println!("This device: {}", endpoint.id().fmt_short());
+            println!("This device: {}", peers.device(&endpoint.id()));
 
             SenderArgs {
                 files,
@@ -454,17 +466,20 @@ async fn send(
         }
     };
 
+    // The receiver is vouched for if it knew the code or the password. With a plain
+    // ticket it is whoever had the ticket first.
+    let verified = sender_args.expected_peer.is_some() || sender_args.password.is_some();
     let sender = Sender::connect(endpoint, sender_args).await?;
-    let result = send_to(sender, &peers).await;
+    let result = send_to(sender, &peers, verified).await;
 
     std::mem::drop(clipboard);
     result
 }
 
 /// Send the files over a connection that is set up
-async fn send_to(mut sender: Sender, peers: &PeerOptions) -> Result<(), Failure> {
+async fn send_to(mut sender: Sender, peers: &PeerOptions, verified: bool) -> Result<(), Failure> {
     println!("Receiver:    {}", sender.remote_id().fmt_short());
-    peers.remember(sender.peer_identity())?;
+    peers.remember(sender.peer_identity(), verified)?;
 
     // Give iroh some time to switch the connection to direct
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -587,7 +602,7 @@ async fn receive(
     let mut password = password.then(password::ask).transpose()?;
 
     let endpoint = net::bind(&settings, peers.secret_key()?).await?;
-    println!("This device: {}", endpoint.id().fmt_short());
+    println!("This device: {}", peers.device(&endpoint.id()));
 
     // Telling the own address is only needed when the sender is to save this device
     let announce = match &peers.dir {
@@ -641,7 +656,9 @@ async fn receive(
         (_, _, None) => return Err("no code or ticket given".into()),
     };
     println!("Sender:      {}", receiver.remote_id().fmt_short());
-    peers.remember(receiver.peer_identity())?;
+    // The sender is always vouched for: by the code, by the key in the ticket, or by
+    // being the saved peer this device waited for
+    peers.remember(receiver.peer_identity(), true)?;
 
     // Give iroh some time to switch the connection to direct
     tokio::time::sleep(Duration::from_secs(4)).await;
