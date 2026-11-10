@@ -10,9 +10,10 @@ use qs_core::{
 
 /// Put `text` on the clipboard. Returns the clipboard handle on success.
 ///
-/// TODO (decision, audit finding N2): codes and tickets are secrets, and a clipboard
-/// history or a synced clipboard can show them to others before they are used. Add a
-/// flag and a config setting to switch this off, or make it opt-in.
+/// Codes and tickets are secrets, and a clipboard history or a synced clipboard can show
+/// them to others before they are used. `--no-clipboard` and `clipboard = false` in the
+/// config file switch this off.
+/// TODO (decision, audit finding N2): whether copying should be off unless asked for.
 pub fn copy_to_clipboard(text: &str) -> Option<arboard::Clipboard> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
     clipboard.set_text(text).ok()?;

@@ -12,6 +12,8 @@
 //! output_dir = "/home/me/Downloads"
 //! # Fixed UDP port instead of a random one
 //! port = 4433
+//! # Copy codes and tickets to the clipboard, on by default
+//! clipboard = true
 //!
 //! [known_peers]
 //! homelab = "<endpoint id>"
@@ -112,6 +114,8 @@ pub struct Config {
     pub relay: Option<RelaySetting>,
     pub output_dir: Option<PathBuf>,
     pub port: Option<u16>,
+    /// Copy codes and tickets to the clipboard
+    pub clipboard: Option<bool>,
     /// Alias to endpoint id
     #[serde(default)]
     pub known_peers: BTreeMap<String, String>,
@@ -171,6 +175,10 @@ pub struct NetworkArgs {
     /// Fixed UDP port instead of a random one
     #[clap(long, global = true)]
     pub port: Option<u16>,
+
+    /// Do not copy the code or ticket to the clipboard
+    #[clap(long, global = true)]
+    pub no_clipboard: bool,
 }
 
 /// The settings in effect: command line, then config file, then defaults
@@ -183,6 +191,8 @@ pub struct Settings {
     pub output_dir: Option<PathBuf>,
     /// [None] means a random port
     pub port: Option<u16>,
+    /// Whether codes and tickets are copied to the clipboard
+    pub clipboard: bool,
     pub known_peers: BTreeMap<String, String>,
 }
 
@@ -201,6 +211,8 @@ impl Settings {
             relay: args.relay.clone().or(config.relay).unwrap_or_default(),
             output_dir: output.or(config.output_dir),
             port: args.port.or(config.port),
+            // The flag can only switch it off, like the setting in the file
+            clipboard: !args.no_clipboard && config.clipboard.unwrap_or(true),
             known_peers: config.known_peers,
         }
     }
@@ -302,12 +314,31 @@ mod tests {
             rendezvous: Some("https://flag".to_string()),
             relay: Some(RelaySetting::Default),
             port: Some(2),
+            no_clipboard: false,
         };
         let settings = Settings::resolve(&args, Some(PathBuf::from(".")), config());
         assert_eq!(settings.rendezvous_url.as_deref(), Some("https://flag"));
         assert_eq!(settings.relay, RelaySetting::Default);
         assert_eq!(settings.output_dir, Some(PathBuf::from(".")));
         assert_eq!(settings.port, Some(2));
+    }
+
+    #[test]
+    fn clipboard_is_on_unless_switched_off() {
+        let resolve = |no_clipboard, file: &str| {
+            let args = NetworkArgs {
+                no_clipboard,
+                ..Default::default()
+            };
+            Settings::resolve(&args, None, Config::parse(file).unwrap()).clipboard
+        };
+
+        assert!(resolve(false, ""));
+        assert!(resolve(false, "clipboard = true"));
+        assert!(!resolve(false, "clipboard = false"));
+        assert!(!resolve(true, ""));
+        // The flag wins over a file that switches it on
+        assert!(!resolve(true, "clipboard = true"));
     }
 
     #[test]

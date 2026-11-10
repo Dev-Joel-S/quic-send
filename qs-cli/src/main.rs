@@ -416,7 +416,10 @@ async fn send(
             set_pending_slot(Some(offer.handle()));
 
             let code = offer.code().to_string();
-            clipboard = ui::copy_to_clipboard(&code);
+            clipboard = settings
+                .clipboard
+                .then(|| ui::copy_to_clipboard(&code))
+                .flatten();
             print_secret("Code", &code, clipboard.is_some());
             println!("on the other peer, run the following command:\n");
             println!("{}\n", format!("qs receive {code}").yellow());
@@ -448,7 +451,10 @@ async fn send(
         None => {
             let ticket = Ticket::new(addr)?;
             let text = ticket.to_string();
-            clipboard = ui::copy_to_clipboard(&text);
+            clipboard = settings
+                .clipboard
+                .then(|| ui::copy_to_clipboard(&text))
+                .flatten();
             print_secret("Ticket", &text, clipboard.is_some());
 
             // Without a relay the plain addresses are all there is, and short enough to type
@@ -740,6 +746,7 @@ fn show_config(settings: &Settings, path: Option<&std::path::Path>) -> Result<()
             None => "(random)".to_string(),
         }
     );
+    println!("  clipboard      = {}", settings.clipboard);
 
     if !settings.known_peers.is_empty() {
         println!("\nKnown peers:");

@@ -182,6 +182,8 @@ relay = "default"
 output_dir = "/home/me/Downloads"
 # Fixed UDP port instead of a random one
 port = 4433
+# Copy codes and tickets to the clipboard, on by default
+clipboard = true
 
 # Peers by id, in addition to the ones saved with --save-peer
 [known_peers]
@@ -249,7 +251,7 @@ The code, or the ticket, is the secret. Anyone who sees it in time can take the 
 What you should know before relying on it:
 
 - The PAKE is the RustCrypto [`spake2`](https://crates.io/crates/spake2) crate, which has not had an independent audit. Everything else cryptographic comes from [aws-lc-rs](https://github.com/aws/aws-lc-rs) and rustls. CPace was planned, but no maintained implementation exists.
-- Codes and tickets are copied to the clipboard. A clipboard history or a synced clipboard can show them to others before they are used.
+- Codes and tickets are copied to the clipboard. A clipboard history or a synced clipboard can show them to others before they are used. `--no-clipboard`, or `clipboard = false` in the config file, switches that off.
 - The code of this fork has not been audited by anyone outside either.
 
 ## License
