@@ -7,6 +7,7 @@ use crate::{
         local_name, local_progress, part_path, resolve, validate_offer, Destination, NameError,
         Placement, ResumeState,
     },
+    limits::{check_offer, check_space, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
     BUF_SIZE, QS_ALPN, QS_PROTO_VERSION,
 };
@@ -178,6 +179,8 @@ pub enum ReceiveError {
     ReceivePacket(#[from] PacketRecvError),
     #[error("{0}")]
     FileName(#[from] NameError),
+    #[error("{0}")]
+    Limit(#[from] LimitError),
 }
 
 /// A receiver that can receive files
@@ -233,6 +236,20 @@ impl Receiver {
         connection_path(&self.conn)
     }
 
+    /// The id of the sender. iroh only connects to the id that was dialed,
+    /// so this is always the one from the ticket or the pairing.
+    pub fn remote_id(&self) -> iroh::EndpointId {
+        self.conn.remote_id()
+    }
+
+    /// Tell the sender that the files are not accepted and fail with `error`
+    async fn reject<T>(&mut self, error: ReceiveError) -> Result<T, ReceiveError> {
+        send_packet(ReceiverToSender::RejectFiles, &self.conn).await?;
+        // Wait for the sender to acknowledge the rejection
+        self.wait_for_close().await;
+        Err(error)
+    }
+
     /// Receive files
     /// # Arguments
     /// * `initial_progress_callback` - Callback with the initial progress of each file to send (name, current, total)
@@ -277,12 +294,12 @@ impl Receiver {
             p => return Err(ReceiveError::UnexpectedDataPacket(p)),
         };
 
-        // TODO: apply `crate::limits` to the offer here, before anything is shown or accepted:
-        // number of entries, depth, total size, and enough free disk space at the destination.
-        if let Err(e) = validate_offer(&files_offered) {
-            send_packet(ReceiverToSender::RejectFiles, &self.conn).await?;
-            self.wait_for_close().await;
-            return Err(e.into());
+        // The offer is untrusted: check its shape and every name before it is shown
+        let checked = check_offer(&files_offered)
+            .map_err(ReceiveError::from)
+            .and_then(|()| validate_offer(&files_offered).map_err(ReceiveError::from));
+        if let Err(e) = checked {
+            return self.reject(e).await;
         }
 
         let output_path = match accept_files_callback(&files_offered) {
@@ -313,6 +330,25 @@ impl Receiver {
                 Placement::New | Placement::Overwrite => None,
             })
             .collect();
+
+        // Only what is not on disk yet has to fit
+        let needed: u64 = files_offered
+            .iter()
+            .zip(&files_to_skip)
+            .map(|(offered, skip)| {
+                let skipped = skip.as_ref().map(|s| s.skip()).unwrap_or(0);
+                offered.size().saturating_sub(skipped)
+            })
+            .sum();
+        match fs4::available_space(&output_path) {
+            Ok(available) => {
+                if let Err(e) = check_space(needed, available) {
+                    return self.reject(e.into()).await;
+                }
+            }
+            // Not every file system can tell, the transfer then fails when the disk is full
+            Err(e) => tracing::debug!("could not determine the free disk space: {e}"),
+        }
 
         let to_receive: Vec<Option<FileSendRecvTree>> = files_offered
             .iter()

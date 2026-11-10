@@ -3,8 +3,9 @@
 use crate::{
     common::{
         connection_path, get_files_available, receive_packet, send_packet, ConnectionPath,
-        FileSendRecvTree, PacketRecvError,
+        FileSendRecvTree, FilesAvailable, PacketRecvError,
     },
+    limits::{check_offer, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
     BUF_SIZE, QS_PROTO_VERSION,
 };
@@ -138,6 +139,21 @@ pub enum SendError {
     ReceivePacket(#[from] PacketRecvError),
     #[error("failed to fetch the endpoint address: {0}")]
     EndpointAddr(String),
+    #[error("{0}")]
+    Limit(#[from] LimitError),
+    #[error("two of the files or directories to send are both named {0:?}")]
+    DuplicateName(String),
+    #[error("the receiver asked to skip files that were not offered")]
+    InvalidSkip,
+}
+
+/// A name that more than one of the top level entries has
+fn duplicate_name(files: &[FilesAvailable]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    files
+        .iter()
+        .find(|file| !seen.insert(file.name()))
+        .map(|file| file.name().to_string())
 }
 
 /// A client that can send files
@@ -148,12 +164,26 @@ pub struct Sender {
     conn: iroh::endpoint::Connection,
     /// The local endpoint
     endpoint: iroh::Endpoint,
+    /// Turns away everyone who connects after the receiver
+    refuse_others: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Sender {
+    fn drop(&mut self) {
+        self.refuse_others.abort();
+    }
 }
 
 /// Arguments for the sender
 pub struct SenderArgs {
     /// Files/Directories to send
     pub files: Vec<PathBuf>,
+    /// Only this peer may connect, everyone else is turned away.
+    ///
+    /// Known after a pairing or for a saved peer. With [None] the first peer that
+    /// connects is taken, which is all a plain ticket can offer: whoever has the
+    /// ticket may receive.
+    pub expected_peer: Option<iroh::EndpointId>,
 }
 
 impl Sender {
@@ -161,18 +191,49 @@ impl Sender {
         this_endpoint: iroh::Endpoint,
         args: SenderArgs,
     ) -> Result<Self, SendError> {
-        // TODO: accept only the `EndpointId` that pairing (or `peers`) told us to expect, and
-        // close every other connection right away. Today the first connection of anyone is
-        // taken, so whoever has the ticket can take the files. Also stop accepting after the
-        // first valid receiver. See `crate::peers` and `crate::pairing`.
-        let Some(incoming) = this_endpoint.accept().await else {
-            return Err(SendError::Connect("the endpoint was closed".to_string()));
+        let conn = loop {
+            let Some(incoming) = this_endpoint.accept().await else {
+                return Err(SendError::Connect("the endpoint was closed".to_string()));
+            };
+
+            // A broken or hostile connection attempt must not end the wait for the receiver
+            let conn = match incoming.accept() {
+                Ok(accepting) => match accepting.await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::debug!("incoming connection failed: {e}");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("incoming connection failed: {e}");
+                    continue;
+                }
+            };
+
+            match args.expected_peer {
+                Some(expected) if conn.remote_id() != expected => {
+                    tracing::warn!(
+                        "refused a connection from {}, expected {}",
+                        conn.remote_id().fmt_short(),
+                        expected.fmt_short()
+                    );
+                    conn.close(1u32.into(), b"unexpected peer");
+                }
+                _ => break conn,
+            }
         };
 
-        let conn = incoming
-            .accept()?
-            .await
-            .map_err(|e| SendError::Connect(e.to_string()))?;
+        // One receiver per transfer: everybody else is refused from here on
+        let refuse_others = tokio::spawn({
+            let endpoint = this_endpoint.clone();
+            async move {
+                while let Some(incoming) = endpoint.accept().await {
+                    tracing::debug!("refused a second connection");
+                    incoming.refuse();
+                }
+            }
+        });
 
         tracing::info!("receiver connected to sender");
 
@@ -180,6 +241,7 @@ impl Sender {
             args,
             conn,
             endpoint: this_endpoint,
+            refuse_others,
         })
     }
 
@@ -197,6 +259,11 @@ impl Sender {
     /// How the connection is currently routed
     pub fn connection_type(&self) -> ConnectionPath {
         connection_path(&self.conn)
+    }
+
+    /// The id of the receiver that connected
+    pub fn remote_id(&self) -> iroh::EndpointId {
+        self.conn.remote_id()
     }
 
     /// Send files
@@ -248,6 +315,12 @@ impl Sender {
             files
         };
 
+        // The receiver refuses an offer outside the limits, fail here with a clear reason
+        check_offer(&files_available)?;
+        if let Some(name) = duplicate_name(&files_available) {
+            return Err(SendError::DuplicateName(name));
+        }
+
         send_packet(
             SenderToReceiver::FileInfo {
                 files: files_available.clone(),
@@ -270,6 +343,17 @@ impl Sender {
             }
             p => return Err(SendError::UnexpectedDataPacket(p)),
         };
+
+        // The skip list comes from the receiver and is not trusted
+        let valid = to_skip.len() == files_available.len()
+            && to_skip
+                .iter()
+                .zip(&files_available)
+                .all(|(skip, file)| skip.as_ref().is_none_or(|skip| skip.applies_to(file)));
+        if !valid {
+            self.close().await;
+            return Err(SendError::InvalidSkip);
+        }
 
         let to_send: Vec<Option<FileSendRecvTree>> = files_available
             .iter()

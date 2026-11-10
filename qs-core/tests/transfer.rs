@@ -74,9 +74,18 @@ async fn transfer(
     let recv_ep = endpoint().await;
     let addr = local_addr(&send_ep);
 
+    let expected_peer = None;
+
     // Separate tasks, like two separate processes
     let send = tokio::spawn(async move {
-        let mut sender = Sender::connect(send_ep, SenderArgs { files }).await?;
+        let mut sender = Sender::connect(
+            send_ep,
+            SenderArgs {
+                files,
+                expected_peer,
+            },
+        )
+        .await?;
         sender
             .send_files(|| {}, |_| {}, |_| {}, &mut |_| {}, &mut || true)
             .await
@@ -325,4 +334,137 @@ async fn changed_source_is_not_resumed() {
         std::fs::read(out.path().join("big (1).bin")).unwrap(),
         changed
     );
+}
+
+/// Receive into `output` with default callbacks
+async fn receive(
+    endpoint: Endpoint,
+    addr: EndpointAddr,
+    output: &Path,
+) -> Result<bool, ReceiveError> {
+    let output = output.to_path_buf();
+    let mut receiver = Receiver::connect(endpoint, addr, ReceiverArgs { resume: true }).await?;
+    receiver
+        .receive_files(
+            |_| {},
+            |_| Some(output.clone()),
+            |_, _| {},
+            &mut |_| {},
+            &mut || true,
+        )
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sender_only_serves_the_expected_receiver() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let stranger_out = tempfile::tempdir().unwrap();
+
+    let data = content(4, 10_000);
+    write(&src.path().join("secret.bin"), &data);
+
+    let send_ep = endpoint().await;
+    let good_ep = endpoint().await;
+    let stranger_ep = endpoint().await;
+    let addr = local_addr(&send_ep);
+
+    let args = SenderArgs {
+        files: vec![src.path().join("secret.bin")],
+        expected_peer: Some(good_ep.id()),
+    };
+    let send = tokio::spawn(async move {
+        let mut sender = Sender::connect(send_ep, args).await?;
+        sender
+            .send_files(|| {}, |_| {}, |_| {}, &mut |_| {}, &mut || true)
+            .await
+    });
+
+    // Somebody else who got hold of the address is turned away and gets nothing
+    let stranger = tokio::time::timeout(
+        Duration::from_secs(20),
+        receive(stranger_ep, addr.clone(), stranger_out.path()),
+    )
+    .await
+    .expect("the stranger must be refused, not left hanging");
+    assert!(stranger.is_err());
+    assert!(listing(stranger_out.path()).is_empty());
+
+    // The sender is still waiting, and the expected receiver gets the file
+    assert!(receive(good_ep, addr, out.path()).await.unwrap());
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("secret.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn second_receiver_is_refused() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let late_out = tempfile::tempdir().unwrap();
+
+    write(&src.path().join("file.bin"), &content(5, 10_000));
+
+    let send_ep = endpoint().await;
+    let first_ep = endpoint().await;
+    let late_ep = endpoint().await;
+    let addr = local_addr(&send_ep);
+
+    let args = SenderArgs {
+        files: vec![src.path().join("file.bin")],
+        expected_peer: None,
+    };
+    let send = tokio::spawn(async move {
+        let mut sender = Sender::connect(send_ep, args).await?;
+        sender
+            .send_files(|| {}, |_| {}, |_| {}, &mut |_| {}, &mut || true)
+            .await
+    });
+
+    // The first receiver is connected, but has not accepted the files yet
+    let mut first = Receiver::connect(first_ep, addr.clone(), ReceiverArgs { resume: true })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // From now on nobody else gets in, even with the same ticket
+    let late = tokio::time::timeout(
+        Duration::from_secs(20),
+        receive(late_ep, addr, late_out.path()),
+    )
+    .await
+    .expect("the second receiver must be refused, not left hanging");
+    assert!(late.is_err());
+
+    let output = out.path().to_path_buf();
+    let received = first
+        .receive_files(
+            |_| {},
+            |_| Some(output.clone()),
+            |_, _| {},
+            &mut |_| {},
+            &mut || true,
+        )
+        .await;
+    assert!(received.unwrap());
+    assert!(send.await.unwrap().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn same_name_twice_is_refused_by_the_sender() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    write(&src.path().join("a/x.txt"), b"1");
+    write(&src.path().join("b/x.txt"), b"2");
+
+    let outcome = transfer(
+        vec![src.path().join("a/x.txt"), src.path().join("b/x.txt")],
+        out.path(),
+        false,
+        None,
+    )
+    .await;
+
+    assert!(matches!(outcome.send, Err(SendError::DuplicateName(name)) if name == "x.txt"));
+    assert!(outcome.receive.is_err());
+    assert!(listing(out.path()).is_empty());
 }

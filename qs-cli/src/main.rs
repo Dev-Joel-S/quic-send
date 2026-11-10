@@ -213,7 +213,10 @@ async fn main() -> color_eyre::Result<()> {
             println!("on the other peer, run the following command:\n");
             println!("{}", "qs receive <ticket>".yellow());
 
-            let sender_args = SenderArgs { files };
+            let sender_args = SenderArgs {
+                files,
+                expected_peer: None,
+            };
             let mut sender = Sender::connect(endpoint, sender_args).await?;
 
             // Give iroh some time to switch the connection to direct

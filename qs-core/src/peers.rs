@@ -14,7 +14,8 @@
 //!       zero trust.
 //! TODO: decide how a pinned peer is found again: address lookup, a stored address,
 //!       or direct mode.
-//! TODO: the sender accepts only the expected `EndpointId`. Today
-//!       `send::Sender::connect` takes the first connection of anyone.
+//! DONE: the sender accepts only the expected `EndpointId` when it knows one
+//!       (`send::SenderArgs::expected_peer`), refuses everyone else, and refuses every
+//!       further connection once its receiver is in.
 //! TODO: tests: alias lookup, unknown alias, a changed key for a known alias is a loud
 //!       error and not silently replaced.

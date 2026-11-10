@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use async_compression::tokio::write::{GzipDecoder, GzipEncoder};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use crate::limits::{LimitError, NestingGuard, MAX_PACKET_COMPRESSED, MAX_PACKET_SIZE};
+use async_compression::tokio::{bufread::GzipDecoder, write::GzipEncoder};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Tree structure that represents the files that
 /// are being sent/received
@@ -48,7 +49,7 @@ impl FileSendRecvTree {
 }
 
 /// Tree structure that represents the files that are available
-#[derive(Debug, PartialEq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Hash, Serialize)]
 pub enum FilesAvailable {
     File {
         name: String,
@@ -61,6 +62,33 @@ pub enum FilesAvailable {
         files: Vec<FilesAvailable>,
     },
 }
+/// What [FilesAvailable] looks like on the wire. Decoding goes through this type, so
+/// every nested level passes the depth check in the [Deserialize] impl below.
+#[derive(Deserialize)]
+#[serde(rename = "FilesAvailable")]
+enum FilesAvailableWire {
+    File {
+        name: String,
+        size: u64,
+        mtime: Option<u64>,
+    },
+    Dir {
+        name: String,
+        files: Vec<FilesAvailable>,
+    },
+}
+
+impl<'de> Deserialize<'de> for FilesAvailable {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _guard = NestingGuard::enter().map_err(serde::de::Error::custom)?;
+
+        Ok(match FilesAvailableWire::deserialize(deserializer)? {
+            FilesAvailableWire::File { name, size, mtime } => Self::File { name, size, mtime },
+            FilesAvailableWire::Dir { name, files } => Self::Dir { name, files },
+        })
+    }
+}
+
 /// Get the available files
 pub fn get_files_available(path: &Path) -> std::io::Result<FilesAvailable> {
     let name = entry_name(path)?;
@@ -296,7 +324,7 @@ impl FilesAvailable {
 }
 
 /// Tree structure that represents files that have been requested for skipping
-#[derive(Debug, PartialEq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Hash, Serialize)]
 pub enum FilesToSkip {
     File {
         name: String,
@@ -308,7 +336,63 @@ pub enum FilesToSkip {
     },
 }
 
+/// What [FilesToSkip] looks like on the wire, see [FilesAvailableWire]
+#[derive(Deserialize)]
+#[serde(rename = "FilesToSkip")]
+enum FilesToSkipWire {
+    File {
+        name: String,
+        skip: u64,
+    },
+    Dir {
+        name: String,
+        files: Vec<FilesToSkip>,
+    },
+}
+
+impl<'de> Deserialize<'de> for FilesToSkip {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _guard = NestingGuard::enter().map_err(serde::de::Error::custom)?;
+
+        Ok(match FilesToSkipWire::deserialize(deserializer)? {
+            FilesToSkipWire::File { name, skip } => Self::File { name, skip },
+            FilesToSkipWire::Dir { name, files } => Self::Dir { name, files },
+        })
+    }
+}
+
 impl FilesToSkip {
+    /// Whether this skip tree is a valid answer to `offered`.
+    ///
+    /// The receiver chooses it, so the sender must check it before using it: same root,
+    /// every entry exists in the offer with the same kind, nothing is skipped past its size.
+    pub fn applies_to(&self, offered: &FilesAvailable) -> bool {
+        match (self, offered) {
+            (
+                FilesToSkip::File { name, skip },
+                FilesAvailable::File {
+                    name: offered_name,
+                    size,
+                    ..
+                },
+            ) => name == offered_name && skip <= size,
+            (
+                FilesToSkip::Dir { name, files },
+                FilesAvailable::Dir {
+                    name: offered_name,
+                    files: offered_files,
+                },
+            ) => {
+                name == offered_name
+                    && files.len() <= offered_files.len()
+                    && files
+                        .iter()
+                        .all(|skip| offered_files.iter().any(|offered| skip.applies_to(offered)))
+            }
+            _ => false,
+        }
+    }
+
     /// Name of the file or directory
     pub fn name(&self) -> &str {
         match self {
@@ -377,27 +461,27 @@ pub enum PacketRecvError {
     Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("read error {0}")]
     Read(#[from] iroh::endpoint::ReadError),
+    #[error("{0}")]
+    Limit(#[from] LimitError),
 }
 
-// TODO: limit how much is read and how much the decompressed packet may have,
-// see `crate::limits`. This reads until the stream ends without any bound.
+/// Receive one packet.
+///
+/// Both the compressed packet and what it decompresses to are bounded, see [crate::limits].
 pub async fn receive_packet<P: DeserializeOwned + std::fmt::Debug>(
     conn: &iroh::endpoint::Connection,
 ) -> Result<P, PacketRecvError> {
     let mut recv = conn.accept_uni().await?;
-    let mut buf = Vec::new();
 
-    loop {
-        let mut data = vec![0; 1024];
-        if let Some(n) = recv.read(&mut data).await? {
-            buf.extend_from_slice(&data[..n]);
-            continue;
+    let compressed = match recv.read_to_end(MAX_PACKET_COMPRESSED).await {
+        Ok(data) => data,
+        Err(iroh::endpoint::ReadToEndError::TooLong) => {
+            return Err(LimitError::PacketTooLarge(MAX_PACKET_COMPRESSED).into());
         }
+        Err(iroh::endpoint::ReadToEndError::Read(e)) => return Err(e.into()),
+    };
 
-        break;
-    }
-
-    let decompressed = decompress_gzip(&buf).await?;
+    let decompressed = decompress_gzip(&compressed, MAX_PACKET_SIZE).await?;
 
     let packet = postcard::from_bytes(&decompressed)?;
 
@@ -415,11 +499,16 @@ async fn compress_gzip(data: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-async fn decompress_gzip(data: &[u8]) -> std::io::Result<Vec<u8>> {
+/// Decompress `data`, failing if the result is larger than `limit` bytes
+async fn decompress_gzip(data: &[u8], limit: usize) -> Result<Vec<u8>, PacketRecvError> {
     let mut out = Vec::new();
-    let mut decoder = GzipDecoder::new(&mut out);
-    decoder.write_all(data).await?;
-    decoder.shutdown().await?;
+    let decoder = GzipDecoder::new(data);
+    // One byte more than allowed tells "exactly at the limit" and "too large" apart
+    decoder.take(limit as u64 + 1).read_to_end(&mut out).await?;
+
+    if out.len() > limit {
+        return Err(LimitError::PacketTooLarge(limit).into());
+    }
 
     Ok(out)
 }
@@ -433,10 +522,61 @@ mod tests {
     async fn test_compression() {
         let data = b"hellllllllllllllllllllllllo world";
         let compressed = compress_gzip(data).await.unwrap();
-        let decompressed = decompress_gzip(&compressed).await.unwrap();
+        let decompressed = decompress_gzip(&compressed, 1024).await.unwrap();
 
         assert!(compressed.len() < data.len());
         assert_eq!(data, &decompressed[..]);
+    }
+
+    #[tokio::test]
+    async fn decompression_is_bounded() {
+        // A megabyte of zeros compresses to about a kilobyte
+        let bomb = compress_gzip(&vec![0u8; 1024 * 1024]).await.unwrap();
+        assert!(bomb.len() < 4096);
+
+        assert!(decompress_gzip(&bomb, 1024 * 1024).await.is_ok());
+        assert!(matches!(
+            decompress_gzip(&bomb, 1024 * 1024 - 1).await,
+            Err(PacketRecvError::Limit(LimitError::PacketTooLarge(_)))
+        ));
+    }
+
+    #[test]
+    fn skip_tree_must_match_the_offer() {
+        let file = |name: &str, size| FilesAvailable::File {
+            name: name.to_string(),
+            size,
+            mtime: None,
+        };
+        let skip = |name: &str, skip| FilesToSkip::File {
+            name: name.to_string(),
+            skip,
+        };
+        let offered = FilesAvailable::Dir {
+            name: "root".to_string(),
+            files: vec![
+                file("a", 10),
+                FilesAvailable::Dir {
+                    name: "sub".to_string(),
+                    files: vec![file("b", 20)],
+                },
+            ],
+        };
+        let dir = |name: &str, files| FilesToSkip::Dir {
+            name: name.to_string(),
+            files,
+        };
+
+        assert!(dir("root", vec![skip("a", 10)]).applies_to(&offered));
+        assert!(dir("root", vec![dir("sub", vec![skip("b", 5)])]).applies_to(&offered));
+        assert!(dir("root", vec![]).applies_to(&offered));
+
+        // Wrong root, unknown entry, wrong kind, skipping past the end
+        assert!(!dir("other", vec![]).applies_to(&offered));
+        assert!(!dir("root", vec![skip("zzz", 1)]).applies_to(&offered));
+        assert!(!dir("root", vec![skip("sub", 1)]).applies_to(&offered));
+        assert!(!dir("root", vec![skip("a", 11)]).applies_to(&offered));
+        assert!(!skip("root", 0).applies_to(&offered));
     }
 
     #[test]
