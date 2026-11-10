@@ -83,6 +83,7 @@ async fn code_pairs_and_files_arrive() {
             files,
             expected_peer: Some(peer),
             password: None,
+            announce: None,
         };
         let mut sender = Sender::connect(send_ep, args).await.unwrap();
         let sent = sender
@@ -98,9 +99,16 @@ async fn code_pairs_and_files_arrive() {
     let sender_addr = claim.complete(None, recv_id).await.unwrap();
 
     let output = out.path().to_path_buf();
-    let mut receiver = Receiver::connect(recv_ep, sender_addr, ReceiverArgs { resume: true })
-        .await
-        .unwrap();
+    let mut receiver = Receiver::connect(
+        recv_ep,
+        sender_addr,
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
+    )
+    .await
+    .unwrap();
     let received = receiver
         .receive_files(
             |_| {},

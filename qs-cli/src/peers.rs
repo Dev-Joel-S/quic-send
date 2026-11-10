@@ -1,0 +1,116 @@
+//! Saved peers in the CLI: where they are kept, looking them up, saving and listing them.
+//!
+//! The logic is in `qs_core::peers`. Peers saved with `--save-peer` are kept in
+//! `known_peers.json` next to the config file. Entries of `[known_peers]` in the config
+//! file are read as well, they only have an id and are never written by qs.
+
+use crate::config::{config_dir, RelaySetting, Settings};
+use colored::Colorize;
+use iroh::{EndpointAddr, EndpointId, SecretKey};
+use qs_core::peers::{load_or_create_identity, KnownPeer, PeerError, PeerStore};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+type Failure = Box<dyn std::error::Error>;
+
+/// The directory with the identity and the saved peers: next to the config file
+pub fn state_dir(explicit_config: Option<&Path>) -> Result<PathBuf, Failure> {
+    let dir = match explicit_config {
+        Some(config) => config.parent().map(Path::to_path_buf),
+        None => config_dir(),
+    };
+    dir.ok_or_else(|| "there is no config directory on this system to keep peers in".into())
+}
+
+/// The stable identity of this device
+pub fn identity(dir: &Path) -> Result<SecretKey, Failure> {
+    Ok(load_or_create_identity(dir)?)
+}
+
+/// The peer known as `alias`: saved with `--save-peer`, or listed in the config file
+pub fn lookup(dir: &Path, settings: &Settings, alias: &str) -> Result<KnownPeer, Failure> {
+    let store = PeerStore::load(dir)?;
+    if let Ok(peer) = store.get(alias) {
+        return Ok(peer.clone());
+    }
+
+    let Some(id) = settings.known_peers.get(alias) else {
+        return Err(PeerError::Unknown(alias.to_string()).into());
+    };
+    let id = EndpointId::from_str(id.trim())
+        .map_err(|_| format!("the id of {alias:?} in the config file is not a valid id"))?;
+
+    // Only the id is known. With an own relay that both sides use, that is enough.
+    let mut peer = KnownPeer::from_id(id);
+    if let RelaySetting::Custom(relay) = &settings.relay {
+        peer.relay = Some(relay.clone());
+    }
+    Ok(peer)
+}
+
+/// The address to dial `alias` at
+pub fn address(dir: &Path, settings: &Settings, alias: &str) -> Result<EndpointAddr, Failure> {
+    let addr = lookup(dir, settings, alias)?.addr();
+    if addr.is_empty() {
+        return Err(PeerError::NoAddress(alias.to_string()).into());
+    }
+    Ok(addr)
+}
+
+/// Save the peer of this transfer as `alias`, if it told where to find it again
+pub fn remember(dir: &Path, alias: &str, peer: Option<&EndpointAddr>) -> Result<(), Failure> {
+    let Some(peer) = peer else {
+        eprintln!(
+            "{} the other side did not use --save-peer, so it has no identity that \
+             stays. Nothing was saved.",
+            "warning:".yellow().bold()
+        );
+        return Ok(());
+    };
+
+    let mut store = PeerStore::load(dir)?;
+    store.save(alias, KnownPeer::from(peer))?;
+    println!(
+        "Saved this peer as {}. Next time no code is needed: {} or {}",
+        alias.bright_white(),
+        format!("qs send --to {alias}").yellow(),
+        format!("qs receive --from {alias}").yellow()
+    );
+    Ok(())
+}
+
+/// Print the saved peers
+pub fn list(dir: &Path, settings: &Settings) -> Result<(), Failure> {
+    let store = PeerStore::load(dir)?;
+
+    if store.peers().is_empty() && settings.known_peers.is_empty() {
+        println!("No peers saved. Use --save-peer <name> on both sides of a transfer.");
+        return Ok(());
+    }
+
+    for (alias, peer) in store.peers() {
+        println!("{}  {}", alias.bright_white(), peer.id);
+        if let Some(relay) = &peer.relay {
+            println!("    relay   {relay}");
+        }
+        for address in &peer.addresses {
+            println!("    address {address}");
+        }
+    }
+    for (alias, id) in &settings.known_peers {
+        if !store.peers().contains_key(alias) {
+            println!("{}  {id}  (from the config file)", alias.bright_white());
+        }
+    }
+    Ok(())
+}
+
+/// Forget a saved peer
+pub fn remove(dir: &Path, alias: &str) -> Result<(), Failure> {
+    let mut store = PeerStore::load(dir)?;
+    store.remove(alias)?;
+    println!("Removed {alias}.");
+    Ok(())
+}

@@ -90,6 +90,7 @@ async fn transfer(
                 files,
                 expected_peer,
                 password: None,
+                announce: None,
             },
         )
         .await?;
@@ -105,8 +106,15 @@ async fn transfer(
         let received = received.clone();
         let destinations = destinations.clone();
         async move {
-            let mut receiver =
-                Receiver::connect(recv_ep, addr, ReceiverArgs { resume: !overwrite }).await?;
+            let mut receiver = Receiver::connect(
+                recv_ep,
+                addr,
+                ReceiverArgs {
+                    resume: !overwrite,
+                    announce: None,
+                },
+            )
+            .await?;
             receiver
                 .receive_files(
                     |_| {},
@@ -350,7 +358,15 @@ async fn receive(
     output: &Path,
 ) -> Result<bool, ReceiveError> {
     let output = output.to_path_buf();
-    let mut receiver = Receiver::connect(endpoint, addr, ReceiverArgs { resume: true }).await?;
+    let mut receiver = Receiver::connect(
+        endpoint,
+        addr,
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
+    )
+    .await?;
     receiver
         .receive_files(
             |_| {},
@@ -380,6 +396,7 @@ async fn sender_only_serves_the_expected_receiver() {
         files: vec![src.path().join("secret.bin")],
         expected_peer: Some(good_ep.id()),
         password: None,
+        announce: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -421,6 +438,7 @@ async fn second_receiver_is_refused() {
         files: vec![src.path().join("file.bin")],
         expected_peer: None,
         password: None,
+        announce: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -430,9 +448,16 @@ async fn second_receiver_is_refused() {
     });
 
     // The first receiver is connected, but has not accepted the files yet
-    let mut first = Receiver::connect(first_ep, addr.clone(), ReceiverArgs { resume: true })
-        .await
-        .unwrap();
+    let mut first = Receiver::connect(
+        first_ep,
+        addr.clone(),
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
+    )
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // From now on nobody else gets in, even with the same ticket
@@ -525,6 +550,7 @@ async fn classical_receiver_is_refused() {
         files: vec![src.path().join("file.bin")],
         expected_peer: None,
         password: None,
+        announce: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -583,6 +609,7 @@ async fn password_sender(
         files: vec![src.join("file.bin")],
         expected_peer: None,
         password: password.map(|p| zeroize::Zeroizing::new(p.to_string())),
+        announce: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -601,8 +628,15 @@ async fn receive_with_password(
     password: Option<&str>,
 ) -> Result<bool, ReceiveError> {
     let output = output.to_path_buf();
-    let mut receiver =
-        Receiver::connect(endpoint().await, addr, ReceiverArgs { resume: true }).await?;
+    let mut receiver = Receiver::connect(
+        endpoint().await,
+        addr,
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
+    )
+    .await?;
     receiver.authenticate(password).await?;
     receiver
         .receive_files(
@@ -693,7 +727,10 @@ async fn nothing_is_offered_without_the_password() {
     let mut receiver = Receiver::connect(
         endpoint().await,
         addr.clone(),
-        ReceiverArgs { resume: true },
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
     )
     .await
     .unwrap();
@@ -742,7 +779,10 @@ async fn receiver_can_ask_for_the_password_and_come_back() {
     let receiver = Receiver::connect(
         endpoint().await,
         addr.clone(),
-        ReceiverArgs { resume: true },
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
     )
     .await
     .unwrap();
@@ -751,9 +791,16 @@ async fn receiver_can_ask_for_the_password_and_come_back() {
 
     // Second contact with the same endpoint and the password at hand
     let output = out.path().to_path_buf();
-    let mut receiver = Receiver::connect(recv_ep, addr, ReceiverArgs { resume: true })
-        .await
-        .unwrap();
+    let mut receiver = Receiver::connect(
+        recv_ep,
+        addr,
+        ReceiverArgs {
+            resume: true,
+            announce: None,
+        },
+    )
+    .await
+    .unwrap();
     receiver.authenticate(Some("hunter2")).await.unwrap();
     let received = receiver
         .receive_files(
@@ -815,4 +862,179 @@ async fn silent_peer_does_not_keep_the_receiver_out() {
     assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
 
     assert!(silent_conn.close_reason().is_some());
+}
+
+/// A sender that dials `addr` with one small file
+fn dialing_sender(
+    endpoint: Endpoint,
+    addr: EndpointAddr,
+    file: PathBuf,
+    announce: Option<EndpointAddr>,
+) -> tokio::task::JoinHandle<Result<(Option<EndpointAddr>, bool), SendError>> {
+    tokio::spawn(async move {
+        let args = SenderArgs {
+            files: vec![file],
+            expected_peer: None,
+            password: None,
+            announce,
+        };
+        let mut sender = Sender::dial(endpoint, addr, args).await?;
+        let identity = sender.peer_identity().cloned();
+        let sent = sender
+            .send_files(|| {}, |_| {}, |_| {}, &mut |_| {}, &mut || true)
+            .await?;
+        Ok((identity, sent))
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_peer_is_dialed_without_code_or_ticket() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let data = content(11, 30_000);
+    write(&src.path().join("file.bin"), &data);
+
+    // Both know each other from before: the sender has the receiver's address,
+    // the receiver the sender's id
+    let send_ep = endpoint().await;
+    let recv_ep = endpoint().await;
+    let send_addr = local_addr(&send_ep);
+    let recv_addr = local_addr(&recv_ep);
+    let send_id = send_ep.id();
+
+    let output = out.path().to_path_buf();
+    let announce = recv_addr.clone();
+    let receive = tokio::spawn(async move {
+        let args = ReceiverArgs {
+            resume: true,
+            announce: Some(announce),
+        };
+        let mut receiver = Receiver::accept(recv_ep, send_id, args).await?;
+        let identity = receiver.peer_identity().cloned();
+        let received = receiver
+            .receive_files(
+                |_| {},
+                |_| Some(output.clone()),
+                |_, _| {},
+                &mut |_| {},
+                &mut || true,
+            )
+            .await?;
+        Ok::<_, ReceiveError>((identity, received))
+    });
+
+    let send = dialing_sender(
+        send_ep,
+        recv_addr.clone(),
+        src.path().join("file.bin"),
+        Some(send_addr.clone()),
+    );
+
+    let (receiver_saw, received) = receive.await.unwrap().unwrap();
+    let (sender_saw, sent) = send.await.unwrap().unwrap();
+    assert!(received && sent);
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+
+    // Each side learned where to find the other one again
+    assert_eq!(receiver_saw, Some(send_addr));
+    assert_eq!(sender_saw, Some(recv_addr));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn listening_receiver_only_takes_the_saved_sender() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let data = content(12, 30_000);
+    write(&src.path().join("file.bin"), &data);
+
+    let send_ep = endpoint().await;
+    let stranger_ep = endpoint().await;
+    let recv_ep = endpoint().await;
+    let recv_addr = local_addr(&recv_ep);
+    let send_id = send_ep.id();
+
+    let output = out.path().to_path_buf();
+    let receive = tokio::spawn(async move {
+        let args = ReceiverArgs {
+            resume: true,
+            announce: None,
+        };
+        let mut receiver = Receiver::accept(recv_ep, send_id, args).await?;
+        receiver
+            .receive_files(
+                |_| {},
+                |_| Some(output.clone()),
+                |_, _| {},
+                &mut |_| {},
+                &mut || true,
+            )
+            .await
+    });
+
+    // Somebody else who knows the address cannot push files to the receiver
+    let stranger = dialing_sender(
+        stranger_ep,
+        recv_addr.clone(),
+        src.path().join("file.bin"),
+        None,
+    );
+    let refused = tokio::time::timeout(Duration::from_secs(30), stranger)
+        .await
+        .expect("the stranger must be refused, not left hanging")
+        .unwrap();
+    assert!(refused.is_err());
+    assert!(listing(out.path()).is_empty());
+
+    // The receiver kept waiting for the saved sender
+    assert!(!receive.is_finished());
+    let send = dialing_sender(send_ep, recv_addr, src.path().join("file.bin"), None);
+    assert!(receive.await.unwrap().unwrap());
+    assert!(send.await.unwrap().unwrap().1);
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn announced_identity_has_to_be_the_own_one() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    write(&src.path().join("file.bin"), &content(13, 1000));
+
+    let send_ep = endpoint().await;
+    let recv_ep = endpoint().await;
+    let somebody_else = local_addr(&endpoint().await);
+    let recv_addr = local_addr(&recv_ep);
+    let send_id = send_ep.id();
+
+    let output = out.path().to_path_buf();
+    let receive = tokio::spawn(async move {
+        let args = ReceiverArgs {
+            resume: true,
+            announce: None,
+        };
+        let mut receiver = Receiver::accept(recv_ep, send_id, args).await?;
+        let identity = receiver.peer_identity().cloned();
+        receiver
+            .receive_files(
+                |_| {},
+                |_| Some(output.clone()),
+                |_, _| {},
+                &mut |_| {},
+                &mut || true,
+            )
+            .await?;
+        Ok::<_, ReceiveError>(identity)
+    });
+
+    // The sender claims to be found at an address with another key. Saving that would
+    // pin the wrong device under this peer's name, so it is not taken.
+    let send = dialing_sender(
+        send_ep,
+        recv_addr,
+        src.path().join("file.bin"),
+        Some(somebody_else),
+    );
+
+    assert_eq!(receive.await.unwrap().unwrap(), None);
+    // The receiver announced nothing
+    assert_eq!(send.await.unwrap().unwrap().0, None);
 }

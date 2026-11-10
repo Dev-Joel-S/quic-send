@@ -5,14 +5,15 @@ use crate::{
         connection_path, get_files_available, receive_packet, send_packet, ConnectionPath,
         FileSendRecvTree, FilesAvailable, PacketRecvError,
     },
-    crypto::ensure_post_quantum,
+    crypto::{ensure_post_quantum, CryptoError},
     limits::{check_offer, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
     pairing::pake::Side,
     password::{self, PasswordError, MAX_ATTEMPTS},
-    BUF_SIZE, QS_PROTO_VERSION,
+    BUF_SIZE, QS_ALPN, QS_PROTO_VERSION,
 };
 use async_compression::tokio::write::GzipEncoder;
+use iroh::EndpointAddr;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -151,6 +152,8 @@ pub enum SendError {
     InvalidSkip,
     #[error("{0}")]
     Password(#[from] PasswordError),
+    #[error("{0}")]
+    Crypto(#[from] CryptoError),
 }
 
 /// A name that more than one of the top level entries has
@@ -172,6 +175,19 @@ pub struct Sender {
     endpoint: iroh::Endpoint,
     /// Turns away everyone who connects after the receiver
     refuse_others: tokio::task::JoinHandle<()>,
+    /// Where the receiver said it can be found again
+    peer_identity: Option<EndpointAddr>,
+}
+
+/// Refuse every connection to `endpoint` from now on
+pub(crate) fn refuse_everyone(endpoint: &iroh::Endpoint) -> tokio::task::JoinHandle<()> {
+    let endpoint = endpoint.clone();
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            tracing::debug!("refused a connection");
+            incoming.refuse();
+        }
+    })
 }
 
 impl Drop for Sender {
@@ -195,6 +211,9 @@ pub struct SenderArgs {
     /// For direct mode. With a short code the password already went into the pairing
     /// and this stays [None].
     pub password: Option<Zeroizing<String>>,
+    /// The own address to tell the receiver, so it can save this device as a peer.
+    /// Only set together with the stable identity.
+    pub announce: Option<EndpointAddr>,
 }
 
 /// How long a receiver has to answer the connection request and the password exchange
@@ -203,28 +222,44 @@ const GREETING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// How long a receiver has to read that its password was wrong
 const REJECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// [greet] with a time limit. Saying hello needs no human on the other side, so it is
+/// quick. Whoever takes longer is dropped, or one silent peer could keep everyone else out.
+async fn greet_in_time(
+    conn: &iroh::endpoint::Connection,
+    args: &SenderArgs,
+) -> Result<(Greeting, Option<EndpointAddr>), SendError> {
+    tokio::time::timeout(GREETING_TIMEOUT, greet(conn, args))
+        .await
+        .unwrap_or_else(|_| Err(SendError::Connect("the receiver did not answer".into())))
+}
+
 /// How saying hello to a receiver went
 enum Greeting {
     Welcome,
     WrongPassword,
 }
 
-/// Agree on the protocol version with a receiver and check its password if one is set
+/// Agree on the protocol version with a receiver and check its password if one is set.
+/// Returns how it went and the identity the receiver announced.
 async fn greet(
     conn: &iroh::endpoint::Connection,
-    password: Option<&str>,
-) -> Result<Greeting, SendError> {
+    args: &SenderArgs,
+) -> Result<(Greeting, Option<EndpointAddr>), SendError> {
+    let password = args.password.as_deref().map(String::as_str);
+
     send_packet(
         SenderToReceiver::ConnRequest {
             version_num: QS_PROTO_VERSION.to_string(),
             password: password.is_some(),
+            identity: args.announce.clone(),
         },
         conn,
     )
     .await?;
 
-    match receive_packet::<ReceiverToSender>(conn).await? {
-        ReceiverToSender::Ok => (),
+    let identity = match receive_packet::<ReceiverToSender>(conn).await? {
+        // An announced identity only counts if it is the one this connection is with
+        ReceiverToSender::Ok { identity } => identity.filter(|addr| addr.id == conn.remote_id()),
         ReceiverToSender::WrongVersion { expected } => {
             return Err(SendError::WrongVersion(
                 expected,
@@ -232,10 +267,10 @@ async fn greet(
             ));
         }
         p => return Err(SendError::UnexpectedDataPacket(p)),
-    }
+    };
 
     let Some(password) = password else {
-        return Ok(Greeting::Welcome);
+        return Ok((Greeting::Welcome, identity));
     };
 
     let (pake, message) = password::start(Side::Sender, password);
@@ -256,11 +291,11 @@ async fn greet(
     match accepted {
         Some(proof) => {
             send_packet(SenderToReceiver::PasswordAccepted { proof }, conn).await?;
-            Ok(Greeting::Welcome)
+            Ok((Greeting::Welcome, identity))
         }
         None => {
             send_packet(SenderToReceiver::PasswordRejected, conn).await?;
-            Ok(Greeting::WrongPassword)
+            Ok((Greeting::WrongPassword, None))
         }
     }
 }
@@ -272,7 +307,7 @@ impl Sender {
     ) -> Result<Self, SendError> {
         let mut wrong_passwords = 0;
 
-        let conn = loop {
+        let (conn, peer_identity) = loop {
             let Some(incoming) = this_endpoint.accept().await else {
                 return Err(SendError::Connect("the endpoint was closed".to_string()));
             };
@@ -310,16 +345,9 @@ impl Sender {
                 }
             }
 
-            // Saying hello needs no human on the other side, so it is quick. Whoever
-            // takes longer is dropped, or one silent peer could keep everyone else out.
-            let password = args.password.as_deref().map(String::as_str);
-            let greeting = tokio::time::timeout(GREETING_TIMEOUT, greet(&conn, password))
-                .await
-                .unwrap_or_else(|_| Err(SendError::Connect("the receiver did not answer".into())));
-
-            match greeting {
-                Ok(Greeting::Welcome) => break conn,
-                Ok(Greeting::WrongPassword) => {
+            match greet_in_time(&conn, &args).await {
+                Ok((Greeting::Welcome, identity)) => break (conn, identity),
+                Ok((Greeting::WrongPassword, _)) => {
                     // Give the receiver a moment to read the rejection, it hangs up then.
                     // Closing right away could drop the packet that tells it why.
                     let _ = tokio::time::timeout(REJECTION_GRACE, conn.closed()).await;
@@ -346,15 +374,7 @@ impl Sender {
         };
 
         // One receiver per transfer: everybody else is refused from here on
-        let refuse_others = tokio::spawn({
-            let endpoint = this_endpoint.clone();
-            async move {
-                while let Some(incoming) = endpoint.accept().await {
-                    tracing::debug!("refused a second connection");
-                    incoming.refuse();
-                }
-            }
-        });
+        let refuse_others = refuse_everyone(&this_endpoint);
 
         tracing::info!("receiver connected to sender");
 
@@ -363,7 +383,59 @@ impl Sender {
             conn,
             endpoint: this_endpoint,
             refuse_others,
+            peer_identity,
         })
+    }
+
+    /// Connect to a receiver that waits for this device at `addr`, a saved peer.
+    ///
+    /// The other way round from [Sender::connect]: the receiver listens and the sender
+    /// dials. iroh only completes a connection to the id in `addr`, so the receiver is
+    /// the saved peer or nobody.
+    pub async fn dial(
+        this_endpoint: iroh::Endpoint,
+        addr: EndpointAddr,
+        args: SenderArgs,
+    ) -> Result<Self, SendError> {
+        let conn = this_endpoint
+            .connect(addr, QS_ALPN)
+            .await
+            .map_err(|e| SendError::Connect(e.to_string()))?;
+
+        if let Err(e) = ensure_post_quantum(&conn) {
+            conn.close(2u32.into(), b"post-quantum key exchange required");
+            this_endpoint.close().await;
+            return Err(e.into());
+        }
+
+        let peer_identity = match greet_in_time(&conn, &args).await {
+            Ok((Greeting::Welcome, identity)) => identity,
+            Ok((Greeting::WrongPassword, _)) => {
+                let _ = tokio::time::timeout(REJECTION_GRACE, conn.closed()).await;
+                this_endpoint.close().await;
+                return Err(PasswordError::Wrong.into());
+            }
+            Err(e) => {
+                this_endpoint.close().await;
+                return Err(e);
+            }
+        };
+
+        // This endpoint called out, nobody has a reason to call in
+        let refuse_others = refuse_everyone(&this_endpoint);
+
+        Ok(Self {
+            args,
+            conn,
+            endpoint: this_endpoint,
+            refuse_others,
+            peer_identity,
+        })
+    }
+
+    /// Where the receiver said it can be found again, if it uses its stable identity
+    pub fn peer_identity(&self) -> Option<&EndpointAddr> {
+        self.peer_identity.as_ref()
     }
 
     /// Close the connection

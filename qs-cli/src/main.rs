@@ -36,6 +36,7 @@ mod config;
 mod drop;
 mod net;
 mod password;
+mod peers;
 mod ui;
 
 #[derive(Parser, Debug)]
@@ -73,6 +74,15 @@ enum Mode {
         /// You are asked for it, it is never given on the command line
         #[clap(long, short)]
         password: bool,
+
+        /// Send to a saved peer, without code or ticket. It has to be waiting with
+        /// `qs receive --from <you>`
+        #[clap(long, value_name = "NAME", conflicts_with = "direct")]
+        to: Option<String>,
+
+        /// Save the receiver under this name for `--to`. Both sides have to ask for it
+        #[clap(long, value_name = "NAME")]
+        save_peer: Option<String>,
     },
     #[clap(name = "receive", about = "Receive files", aliases = &["r"])]
     Receive {
@@ -98,12 +108,34 @@ enum Mode {
         /// Ask for the password right away. Without this you are asked if the sender set one
         #[clap(long, short)]
         password: bool,
+
+        /// Wait for a saved peer to send, without code or ticket
+        #[clap(long, value_name = "NAME", conflicts_with = "code")]
+        from: Option<String>,
+
+        /// Save the sender under this name for `--from`. Both sides have to ask for it
+        #[clap(long, value_name = "NAME")]
+        save_peer: Option<String>,
     },
     #[clap(
         name = "config",
         about = "Show the config file and the settings in effect"
     )]
     Config,
+    #[clap(name = "peers", about = "List the saved peers, or remove one")]
+    Peers {
+        #[clap(subcommand)]
+        action: Option<PeersAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PeersAction {
+    #[clap(about = "Forget a saved peer")]
+    Remove {
+        /// The name the peer was saved under
+        name: String,
+    },
 }
 
 /// An error to show to the user as it is, without a backtrace
@@ -180,15 +212,20 @@ async fn main() -> ExitCode {
 
 async fn run(args: Args) -> Result<(), Failure> {
     let (config, config_path) = Config::load(args.config.as_deref())?;
+    // Identity and saved peers live next to the config file
+    let state_dir = || peers::state_dir(args.config.as_deref());
 
     match args.mode {
         Mode::Send {
             files,
             direct,
             password,
+            to,
+            save_peer,
         } => {
             let settings = Settings::resolve(&args.network, None, config);
-            send(settings, files, direct, password).await
+            let peers = PeerOptions::new(to, save_peer, state_dir)?;
+            send(settings, files, direct, password, peers).await
         }
         Mode::Receive {
             overwrite,
@@ -197,6 +234,8 @@ async fn run(args: Args) -> Result<(), Failure> {
             code,
             auto_accept,
             password,
+            from,
+            save_peer,
         } => {
             // Paths may have been dragged into the terminal
             let output = if here {
@@ -205,11 +244,68 @@ async fn run(args: Args) -> Result<(), Failure> {
                 output.map(drop::normalize_path_arg)
             };
             let settings = Settings::resolve(&args.network, output, config);
-            receive(settings, code, overwrite, auto_accept, password).await
+            let peers = PeerOptions::new(from, save_peer, state_dir)?;
+            receive(settings, code, overwrite, auto_accept, password, peers).await
         }
         Mode::Config => {
             let settings = Settings::resolve(&args.network, None, config);
             show_config(&settings, config_path.as_deref())
+        }
+        Mode::Peers { action } => {
+            let settings = Settings::resolve(&args.network, None, config);
+            match action {
+                None => peers::list(&state_dir()?, &settings),
+                Some(PeersAction::Remove { name }) => peers::remove(&state_dir()?, &name),
+            }
+        }
+    }
+}
+
+/// What a transfer has to do with saved peers
+struct PeerOptions {
+    /// The saved peer to send to or receive from, instead of a code or ticket
+    known: Option<String>,
+    /// The name to save the other side under
+    save_as: Option<String>,
+    /// Where the identity and the saved peers are kept. Only looked up when needed.
+    dir: Option<PathBuf>,
+}
+
+impl PeerOptions {
+    fn new(
+        known: Option<String>,
+        save_as: Option<String>,
+        state_dir: impl Fn() -> Result<PathBuf, Failure>,
+    ) -> Result<Self, Failure> {
+        let dir = (known.is_some() || save_as.is_some())
+            .then(state_dir)
+            .transpose()?;
+        Ok(Self {
+            known,
+            save_as,
+            dir,
+        })
+    }
+
+    /// The key for this run: the identity that stays when peers are involved,
+    /// otherwise a fresh one that nothing can be linked to
+    fn secret_key(&self) -> Result<SecretKey, Failure> {
+        match &self.dir {
+            Some(dir) => peers::identity(dir),
+            None => Ok(SecretKey::generate()),
+        }
+    }
+
+    /// The own address to tell the other side, if this run uses the identity that stays
+    fn announce(&self, addr: &EndpointAddr) -> Option<EndpointAddr> {
+        self.dir.is_some().then(|| addr.clone())
+    }
+
+    /// Save the other side if that was asked for
+    fn remember(&self, peer: Option<&EndpointAddr>) -> Result<(), Failure> {
+        match (&self.save_as, &self.dir) {
+            (Some(alias), Some(dir)) => peers::remember(dir, alias, peer),
+            _ => Ok(()),
         }
     }
 }
@@ -228,6 +324,7 @@ async fn send(
     files: Vec<PathBuf>,
     direct: bool,
     password: bool,
+    peers: PeerOptions,
 ) -> Result<(), Failure> {
     // Paths may have been dragged into the terminal
     let mut files: Vec<PathBuf> = files.into_iter().map(drop::normalize_path_arg).collect();
@@ -251,8 +348,33 @@ async fn send(
 
     let password = password.then(password::ask_new).transpose()?;
 
-    let endpoint = net::bind(&settings, SecretKey::generate()).await?;
+    let endpoint = net::bind(&settings, peers.secret_key()?).await?;
     let addr = net::own_addr(&endpoint, &settings.relay).await?;
+    let announce = peers.announce(&addr);
+
+    // A saved peer is dialed, it waits for this device and nobody else
+    if let (Some(alias), Some(dir)) = (&peers.known, &peers.dir) {
+        let peer = peers::address(dir, &settings, alias)?;
+        println!("This device: {}", endpoint.id().fmt_short());
+        println!("Connecting to {} ({})...", alias, peer.id.fmt_short());
+
+        let sender_args = SenderArgs {
+            files,
+            expected_peer: None,
+            password,
+            announce,
+        };
+        let sender = Sender::dial(endpoint, peer, sender_args)
+            .await
+            .map_err(|e| {
+                format!(
+                    "could not send to {alias}: {e}\n\
+                     It has to be waiting with `qs receive --from <name of this device>`, \
+                     and both sides have to have saved each other."
+                )
+            })?;
+        return send_to(sender, &peers).await;
+    }
 
     // With a rendezvous server the receiver gets a short code, without one (or with
     // `--direct`) a ticket that carries the address and the key itself.
@@ -298,6 +420,7 @@ async fn send(
                 expected_peer: Some(peer),
                 // The password already went into the pairing
                 password: None,
+                announce,
             }
         }
         None => {
@@ -326,12 +449,22 @@ async fn send(
                 files,
                 expected_peer: None,
                 password,
+                announce,
             }
         }
     };
 
-    let mut sender = Sender::connect(endpoint, sender_args).await?;
+    let sender = Sender::connect(endpoint, sender_args).await?;
+    let result = send_to(sender, &peers).await;
+
+    std::mem::drop(clipboard);
+    result
+}
+
+/// Send the files over a connection that is set up
+async fn send_to(mut sender: Sender, peers: &PeerOptions) -> Result<(), Failure> {
     println!("Receiver:    {}", sender.remote_id().fmt_short());
+    peers.remember(sender.peer_identity())?;
 
     // Give iroh some time to switch the connection to direct
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -366,7 +499,6 @@ async fn send(
         )
         .await?;
 
-    std::mem::drop(clipboard);
     Ok(())
 }
 
@@ -433,6 +565,7 @@ async fn receive(
     overwrite: bool,
     auto_accept: bool,
     password: bool,
+    peers: PeerOptions,
 ) -> Result<(), Failure> {
     let output = resolve_output_dir(settings.output_dir.clone())?;
     println!(
@@ -440,43 +573,75 @@ async fn receive(
         output.display().to_string().bright_white()
     );
 
-    let input = match code {
-        Some(code) => code,
-        None => dialoguer::Input::new()
-            .with_prompt("Enter the code or ticket of the sender")
-            .interact()?,
+    // A saved peer needs no code, everyone else is asked for one if none was given
+    let input = match (&peers.known, code) {
+        (Some(_), _) => None,
+        (None, Some(code)) => Some(code),
+        (None, None) => Some(
+            dialoguer::Input::new()
+                .with_prompt("Enter the code or ticket of the sender")
+                .interact()?,
+        ),
     };
 
     let mut password = password.then(password::ask).transpose()?;
 
-    let endpoint = net::bind(&settings, SecretKey::generate()).await?;
+    let endpoint = net::bind(&settings, peers.secret_key()?).await?;
     println!("This device: {}", endpoint.id().fmt_short());
 
-    let receiver_args = || ReceiverArgs { resume: !overwrite };
+    // Telling the own address is only needed when the sender is to save this device
+    let announce = match &peers.dir {
+        Some(_) => peers.announce(&net::own_addr(&endpoint, &settings.relay).await?),
+        None => None,
+    };
+    let receiver_args = || ReceiverArgs {
+        resume: !overwrite,
+        announce: announce.clone(),
+    };
 
-    let mut receiver = if looks_like_code(&input) {
-        // The password goes into the pairing, the connection needs none after that
-        let addr = pair(&settings, &endpoint, &input, password.take()).await?;
-        Receiver::connect(endpoint, addr, receiver_args()).await?
-    } else {
-        let addr = Ticket::from_str(&input)?.into_addr();
-        let mut receiver = Receiver::connect(endpoint, addr.clone(), receiver_args()).await?;
+    let mut receiver = match (&peers.known, &peers.dir, input) {
+        (Some(alias), Some(dir), _) => {
+            let peer = peers::lookup(dir, &settings, alias)?;
+            println!("Waiting for {} ({})...", alias, peer.id.fmt_short());
+            let mut receiver = Receiver::accept(endpoint, peer.id, receiver_args()).await?;
 
-        // The sender only waits a moment for the password. If it has to be asked for
-        // first, hang up, ask, and come back with it.
-        if receiver.password_required() && password.is_none() {
-            let endpoint = receiver.disconnect().await;
-            println!("The sender protected this transfer with a password.");
-            password = Some(password::ask()?);
-            receiver = Receiver::connect(endpoint, addr, receiver_args()).await?;
+            if receiver.password_required() && password.is_none() {
+                return Err("the sender set a password. Start again with --password, \
+                     the sender has to send again as well"
+                    .into());
+            }
+            receiver
+                .authenticate(password.as_deref().map(String::as_str))
+                .await?;
+            receiver
         }
+        (_, _, Some(input)) if looks_like_code(&input) => {
+            // The password goes into the pairing, the connection needs none after that
+            let addr = pair(&settings, &endpoint, &input, password.take()).await?;
+            Receiver::connect(endpoint, addr, receiver_args()).await?
+        }
+        (_, _, Some(input)) => {
+            let addr = Ticket::from_str(&input)?.into_addr();
+            let mut receiver = Receiver::connect(endpoint, addr.clone(), receiver_args()).await?;
 
-        receiver
-            .authenticate(password.as_deref().map(String::as_str))
-            .await?;
-        receiver
+            // The sender only waits a moment for the password. If it has to be asked for
+            // first, hang up, ask, and come back with it.
+            if receiver.password_required() && password.is_none() {
+                let endpoint = receiver.disconnect().await;
+                println!("The sender protected this transfer with a password.");
+                password = Some(password::ask()?);
+                receiver = Receiver::connect(endpoint, addr, receiver_args()).await?;
+            }
+
+            receiver
+                .authenticate(password.as_deref().map(String::as_str))
+                .await?;
+            receiver
+        }
+        (_, _, None) => return Err("no code or ticket given".into()),
     };
     println!("Sender:      {}", receiver.remote_id().fmt_short());
+    peers.remember(receiver.peer_identity())?;
 
     // Give iroh some time to switch the connection to direct
     tokio::time::sleep(Duration::from_secs(4)).await;

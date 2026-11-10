@@ -202,6 +202,18 @@ pub struct Receiver {
     password_required: bool,
     /// The password was checked
     authenticated: bool,
+    /// Where the sender said it can be found again
+    peer_identity: Option<iroh::EndpointAddr>,
+    /// Turns away everyone who connects after the sender, when this side listened
+    refuse_others: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        if let Some(task) = &self.refuse_others {
+            task.abort();
+        }
+    }
 }
 
 /// Arguments for the receiver
@@ -209,9 +221,13 @@ pub struct ReceiverArgs {
     /// Resume interrupted transfers.
     /// If false, existing destinations are overwritten instead.
     pub resume: bool,
+    /// The own address to tell the sender, so it can save this device as a peer.
+    /// Only set together with the stable identity.
+    pub announce: Option<iroh::EndpointAddr>,
 }
 
 impl Receiver {
+    /// Connect to the sender at `addr`
     pub async fn connect(
         this_endpoint: iroh::Endpoint,
         addr: iroh::EndpointAddr,
@@ -230,31 +246,109 @@ impl Receiver {
 
         tracing::info!("receiver connected to sender");
 
+        Self::welcome(this_endpoint, conn, args, None).await
+    }
+
+    /// Wait for the sender `expected` to connect, a saved peer.
+    ///
+    /// The other way round from [Receiver::connect]: the receiver listens and the sender
+    /// dials. Everyone but `expected` is turned away.
+    pub async fn accept(
+        this_endpoint: iroh::Endpoint,
+        expected: iroh::EndpointId,
+        args: ReceiverArgs,
+    ) -> Result<Self, ReceiveError> {
+        let conn = loop {
+            let Some(incoming) = this_endpoint.accept().await else {
+                return Err(ReceiveError::Connect("the endpoint was closed".to_string()));
+            };
+
+            // A broken or hostile connection attempt must not end the wait for the sender
+            let conn = match incoming.accept() {
+                Ok(accepting) => match accepting.await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::debug!("incoming connection failed: {e}");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("incoming connection failed: {e}");
+                    continue;
+                }
+            };
+
+            if let Err(e) = ensure_post_quantum(&conn) {
+                tracing::warn!("refused a connection: {e}");
+                conn.close(2u32.into(), b"post-quantum key exchange required");
+                continue;
+            }
+
+            if conn.remote_id() != expected {
+                tracing::warn!(
+                    "refused a connection from {}, expected {}",
+                    conn.remote_id().fmt_short(),
+                    expected.fmt_short()
+                );
+                conn.close(1u32.into(), b"unexpected peer");
+                continue;
+            }
+
+            break conn;
+        };
+
+        // One sender per transfer: everybody else is refused from here on
+        let refuse_others = crate::send::refuse_everyone(&this_endpoint);
+
+        tracing::info!("sender connected to receiver");
+
+        Self::welcome(this_endpoint, conn, args, Some(refuse_others)).await
+    }
+
+    /// Answer the connection request of the sender on a fresh connection
+    async fn welcome(
+        this_endpoint: iroh::Endpoint,
+        conn: iroh::endpoint::Connection,
+        args: ReceiverArgs,
+        refuse_others: Option<tokio::task::JoinHandle<()>>,
+    ) -> Result<Self, ReceiveError> {
         // Answer the connection request right away. The sender only waits a moment for
         // this, so that nobody can keep it busy without ever answering.
-        let password_required = match receive_packet::<SenderToReceiver>(&conn).await? {
-            SenderToReceiver::ConnRequest {
-                version_num,
-                password,
-            } => {
-                if version_num != QS_PROTO_VERSION {
+        let (password_required, peer_identity) =
+            match receive_packet::<SenderToReceiver>(&conn).await? {
+                SenderToReceiver::ConnRequest {
+                    version_num,
+                    password,
+                    identity,
+                } => {
+                    if version_num != QS_PROTO_VERSION {
+                        send_packet(
+                            ReceiverToSender::WrongVersion {
+                                expected: QS_PROTO_VERSION.to_string(),
+                            },
+                            &conn,
+                        )
+                        .await?;
+                        return Err(ReceiveError::WrongVersion(
+                            QS_PROTO_VERSION.to_string(),
+                            version_num,
+                        ));
+                    }
                     send_packet(
-                        ReceiverToSender::WrongVersion {
-                            expected: QS_PROTO_VERSION.to_string(),
+                        ReceiverToSender::Ok {
+                            identity: args.announce.clone(),
                         },
                         &conn,
                     )
                     .await?;
-                    return Err(ReceiveError::WrongVersion(
-                        QS_PROTO_VERSION.to_string(),
-                        version_num,
-                    ));
+
+                    // An announced identity only counts if it is the one this connection
+                    // is with
+                    let identity = identity.filter(|addr| addr.id == conn.remote_id());
+                    (password, identity)
                 }
-                send_packet(ReceiverToSender::Ok, &conn).await?;
-                password
-            }
-            p => return Err(ReceiveError::UnexpectedDataPacket(p)),
-        };
+                p => return Err(ReceiveError::UnexpectedDataPacket(p)),
+            };
 
         Ok(Self {
             args,
@@ -262,7 +356,14 @@ impl Receiver {
             endpoint: this_endpoint,
             password_required,
             authenticated: false,
+            peer_identity,
+            refuse_others,
         })
+    }
+
+    /// Where the sender said it can be found again, if it uses its stable identity
+    pub fn peer_identity(&self) -> Option<&iroh::EndpointAddr> {
+        self.peer_identity.as_ref()
     }
 
     /// Whether the sender wants a password.
@@ -276,7 +377,7 @@ impl Receiver {
     /// Hang up without closing the endpoint, to connect again with it
     pub async fn disconnect(self) -> iroh::Endpoint {
         self.conn.close(0u32.into(), &[0]);
-        self.endpoint
+        self.endpoint.clone()
     }
 
     /// Prove to the sender that this side knows the password, and check that the sender

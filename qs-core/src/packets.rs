@@ -1,4 +1,5 @@
 use crate::common::{FilesAvailable, FilesToSkip};
+use iroh::EndpointAddr;
 use serde::{Deserialize, Serialize};
 
 /// All packets send from the sender to the receiver
@@ -9,6 +10,9 @@ pub enum SenderToReceiver {
         version_num: String,
         /// The receiver has to prove that it knows the password before anything is offered
         password: bool,
+        /// Where the sender can be found again, only told when it uses its stable
+        /// identity, see `crate::peers`
+        identity: Option<EndpointAddr>,
     },
     /// The sender's message of the password exchange, see `crate::password`
     Password { message: Vec<u8> },
@@ -26,7 +30,11 @@ pub enum ReceiverToSender {
     /// Reject the connection request, because the version number is wrong
     WrongVersion { expected: String },
     /// Accept the connection request
-    Ok,
+    Ok {
+        /// Where the receiver can be found again, only told when it uses its stable
+        /// identity
+        identity: Option<EndpointAddr>,
+    },
     /// The receiver's message of the password exchange and its proof
     Password { message: Vec<u8>, proof: Vec<u8> },
     /// The receiver was told to use a password, but the sender did not set one
