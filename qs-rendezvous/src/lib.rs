@@ -408,10 +408,26 @@ enum Party {
     Receiver,
 }
 
+/// Compare two tokens without stopping at the first difference, so the time it takes
+/// says nothing about how much of a guessed token was right
+fn same_token(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |difference, (x, y)| difference | (x ^ y))
+            == 0
+}
+
 fn party(slot: &Slot, token: &str) -> Result<Party, ApiError> {
-    if slot.sender_token == token {
+    let is_sender = same_token(&slot.sender_token, token);
+    let is_receiver = slot
+        .receiver_token
+        .as_deref()
+        .is_some_and(|receiver| same_token(receiver, token));
+
+    if is_sender {
         Ok(Party::Sender)
-    } else if slot.receiver_token.as_deref() == Some(token) {
+    } else if is_receiver {
         Ok(Party::Receiver)
     } else {
         Err(ApiError(ErrorCode::Forbidden))
@@ -620,4 +636,19 @@ pub async fn serve(
 
     sweeper.abort();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_token;
+
+    #[test]
+    fn tokens_are_compared_in_full() {
+        assert!(same_token("0123abcd", "0123abcd"));
+        assert!(!same_token("0123abcd", "0123abce"));
+        assert!(!same_token("0123abcd", "1123abcd"));
+        assert!(!same_token("0123abcd", "0123abc"));
+        assert!(!same_token("", "0"));
+        assert!(same_token("", ""));
+    }
 }
