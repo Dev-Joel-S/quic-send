@@ -222,6 +222,7 @@ async fn send(settings: Settings, files: Vec<PathBuf>, _direct: bool) -> Result<
     let sender_args = SenderArgs {
         files,
         expected_peer: None,
+        password: None,
     };
     let mut sender = Sender::connect(endpoint, sender_args).await?;
     println!("Receiver:    {}", sender.remote_id().fmt_short());

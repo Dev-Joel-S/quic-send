@@ -8,12 +8,15 @@ use crate::{
     crypto::ensure_post_quantum,
     limits::{check_offer, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
+    pairing::pake::Side,
+    password::{self, PasswordError, MAX_ATTEMPTS},
     BUF_SIZE, QS_PROTO_VERSION,
 };
 use async_compression::tokio::write::GzipEncoder;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use zeroize::Zeroizing;
 
 /// Generic send function
 ///
@@ -146,6 +149,8 @@ pub enum SendError {
     DuplicateName(String),
     #[error("the receiver asked to skip files that were not offered")]
     InvalidSkip,
+    #[error("{0}")]
+    Password(#[from] PasswordError),
 }
 
 /// A name that more than one of the top level entries has
@@ -185,6 +190,79 @@ pub struct SenderArgs {
     /// connects is taken, which is all a plain ticket can offer: whoever has the
     /// ticket may receive.
     pub expected_peer: Option<iroh::EndpointId>,
+    /// The receiver has to know this password, checked inside the connection.
+    ///
+    /// For direct mode. With a short code the password already went into the pairing
+    /// and this stays [None].
+    pub password: Option<Zeroizing<String>>,
+}
+
+/// How long a receiver has to answer the connection request and the password exchange
+const GREETING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a receiver has to read that its password was wrong
+const REJECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How saying hello to a receiver went
+enum Greeting {
+    Welcome,
+    WrongPassword,
+}
+
+/// Agree on the protocol version with a receiver and check its password if one is set
+async fn greet(
+    conn: &iroh::endpoint::Connection,
+    password: Option<&str>,
+) -> Result<Greeting, SendError> {
+    send_packet(
+        SenderToReceiver::ConnRequest {
+            version_num: QS_PROTO_VERSION.to_string(),
+            password: password.is_some(),
+        },
+        conn,
+    )
+    .await?;
+
+    match receive_packet::<ReceiverToSender>(conn).await? {
+        ReceiverToSender::Ok => (),
+        ReceiverToSender::WrongVersion { expected } => {
+            return Err(SendError::WrongVersion(
+                expected,
+                QS_PROTO_VERSION.to_string(),
+            ));
+        }
+        p => return Err(SendError::UnexpectedDataPacket(p)),
+    }
+
+    let Some(password) = password else {
+        return Ok(Greeting::Welcome);
+    };
+
+    let (pake, message) = password::start(Side::Sender, password);
+    send_packet(SenderToReceiver::Password { message }, conn).await?;
+
+    let (message, proof) = match receive_packet::<ReceiverToSender>(conn).await? {
+        ReceiverToSender::Password { message, proof } => (message, proof),
+        p => return Err(SendError::UnexpectedDataPacket(p)),
+    };
+
+    // The receiver proves itself first. Only then does the sender show its own proof.
+    let accepted = pake
+        .finish(&message)
+        .ok()
+        .filter(|key| password::verify(conn, key, Side::Receiver, &proof))
+        .and_then(|key| password::proof(conn, &key, Side::Sender));
+
+    match accepted {
+        Some(proof) => {
+            send_packet(SenderToReceiver::PasswordAccepted { proof }, conn).await?;
+            Ok(Greeting::Welcome)
+        }
+        None => {
+            send_packet(SenderToReceiver::PasswordRejected, conn).await?;
+            Ok(Greeting::WrongPassword)
+        }
+    }
 }
 
 impl Sender {
@@ -192,6 +270,8 @@ impl Sender {
         this_endpoint: iroh::Endpoint,
         args: SenderArgs,
     ) -> Result<Self, SendError> {
+        let mut wrong_passwords = 0;
+
         let conn = loop {
             let Some(incoming) = this_endpoint.accept().await else {
                 return Err(SendError::Connect("the endpoint was closed".to_string()));
@@ -218,16 +298,50 @@ impl Sender {
                 continue;
             }
 
-            match args.expected_peer {
-                Some(expected) if conn.remote_id() != expected => {
+            if let Some(expected) = args.expected_peer {
+                if conn.remote_id() != expected {
                     tracing::warn!(
                         "refused a connection from {}, expected {}",
                         conn.remote_id().fmt_short(),
                         expected.fmt_short()
                     );
                     conn.close(1u32.into(), b"unexpected peer");
+                    continue;
                 }
-                _ => break conn,
+            }
+
+            // Saying hello needs no human on the other side, so it is quick. Whoever
+            // takes longer is dropped, or one silent peer could keep everyone else out.
+            let password = args.password.as_deref().map(String::as_str);
+            let greeting = tokio::time::timeout(GREETING_TIMEOUT, greet(&conn, password))
+                .await
+                .unwrap_or_else(|_| Err(SendError::Connect("the receiver did not answer".into())));
+
+            match greeting {
+                Ok(Greeting::Welcome) => break conn,
+                Ok(Greeting::WrongPassword) => {
+                    // Give the receiver a moment to read the rejection, it hangs up then.
+                    // Closing right away could drop the packet that tells it why.
+                    let _ = tokio::time::timeout(REJECTION_GRACE, conn.closed()).await;
+                    conn.close(3u32.into(), b"wrong password");
+                    wrong_passwords += 1;
+                    if wrong_passwords >= MAX_ATTEMPTS {
+                        this_endpoint.close().await;
+                        return Err(PasswordError::TooManyAttempts.into());
+                    }
+                    tracing::warn!("a receiver used a wrong password");
+                }
+                // A receiver that cannot work with this sender. That is most likely the
+                // one the user is waiting for, so tell them instead of waiting on.
+                Err(e @ (SendError::WrongVersion(..) | SendError::Password(_))) => {
+                    this_endpoint.close().await;
+                    return Err(e);
+                }
+                // The connection broke while saying hello, somebody else may still come
+                Err(e) => {
+                    tracing::debug!("lost a receiver before the transfer: {e}");
+                    conn.close(4u32.into(), b"no answer");
+                }
             }
         };
 
@@ -286,31 +400,38 @@ impl Sender {
     /// * `Ok(false)` if the transfer was stopped
     pub async fn send_files(
         &mut self,
+        wait_for_other_peer_to_accept_files_callback: impl FnMut(),
+        files_decision_callback: impl FnMut(bool),
+        initial_progress_callback: impl FnMut(&[(String, u64, u64)]),
+        write_callback: &mut impl FnMut(u64),
+        should_continue: &mut impl FnMut() -> bool,
+    ) -> Result<bool, SendError> {
+        let result = self
+            .send_files_inner(
+                wait_for_other_peer_to_accept_files_callback,
+                files_decision_callback,
+                initial_progress_callback,
+                write_callback,
+                should_continue,
+            )
+            .await;
+
+        // Whatever went wrong, hang up, so the receiver knows at once and does not
+        // wait for a connection that will bring nothing
+        if result.is_err() {
+            self.close().await;
+        }
+        result
+    }
+
+    async fn send_files_inner(
+        &mut self,
         mut wait_for_other_peer_to_accept_files_callback: impl FnMut(),
         mut files_decision_callback: impl FnMut(bool),
         mut initial_progress_callback: impl FnMut(&[(String, u64, u64)]),
         write_callback: &mut impl FnMut(u64),
         should_continue: &mut impl FnMut() -> bool,
     ) -> Result<bool, SendError> {
-        send_packet(
-            SenderToReceiver::ConnRequest {
-                version_num: QS_PROTO_VERSION.to_string(),
-            },
-            &self.conn,
-        )
-        .await?;
-
-        match receive_packet::<ReceiverToSender>(&self.conn).await? {
-            ReceiverToSender::Ok => (),
-            ReceiverToSender::WrongVersion { expected } => {
-                return Err(SendError::WrongVersion(
-                    expected,
-                    QS_PROTO_VERSION.to_string(),
-                ));
-            }
-            p => return Err(SendError::UnexpectedDataPacket(p)),
-        }
-
         let files_available = {
             let mut files = Vec::new();
             for file in &self.args.files {
@@ -347,6 +468,10 @@ impl Sender {
                 files_decision_callback(false);
                 self.close().await;
                 return Err(SendError::FilesRejected);
+            }
+            ReceiverToSender::PasswordExpected => {
+                self.close().await;
+                return Err(PasswordError::ExpectedByReceiver.into());
             }
             p => return Err(SendError::UnexpectedDataPacket(p)),
         };

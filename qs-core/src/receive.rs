@@ -10,6 +10,8 @@ use crate::{
     },
     limits::{check_offer, check_space, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
+    pairing::pake::Side,
+    password::{self, PasswordError},
     BUF_SIZE, QS_ALPN, QS_PROTO_VERSION,
 };
 use async_compression::tokio::bufread::GzipDecoder;
@@ -184,6 +186,8 @@ pub enum ReceiveError {
     Limit(#[from] LimitError),
     #[error("{0}")]
     Crypto(#[from] CryptoError),
+    #[error("{0}")]
+    Password(#[from] PasswordError),
 }
 
 /// A receiver that can receive files
@@ -194,6 +198,10 @@ pub struct Receiver {
     conn: iroh::endpoint::Connection,
     /// The local endpoint
     endpoint: iroh::Endpoint,
+    /// The sender wants a password
+    password_required: bool,
+    /// The password was checked
+    authenticated: bool,
 }
 
 /// Arguments for the receiver
@@ -222,11 +230,101 @@ impl Receiver {
 
         tracing::info!("receiver connected to sender");
 
+        // Answer the connection request right away. The sender only waits a moment for
+        // this, so that nobody can keep it busy without ever answering.
+        let password_required = match receive_packet::<SenderToReceiver>(&conn).await? {
+            SenderToReceiver::ConnRequest {
+                version_num,
+                password,
+            } => {
+                if version_num != QS_PROTO_VERSION {
+                    send_packet(
+                        ReceiverToSender::WrongVersion {
+                            expected: QS_PROTO_VERSION.to_string(),
+                        },
+                        &conn,
+                    )
+                    .await?;
+                    return Err(ReceiveError::WrongVersion(
+                        QS_PROTO_VERSION.to_string(),
+                        version_num,
+                    ));
+                }
+                send_packet(ReceiverToSender::Ok, &conn).await?;
+                password
+            }
+            p => return Err(ReceiveError::UnexpectedDataPacket(p)),
+        };
+
         Ok(Self {
             args,
             conn,
             endpoint: this_endpoint,
+            password_required,
+            authenticated: false,
         })
+    }
+
+    /// Whether the sender wants a password.
+    ///
+    /// The sender only waits a moment for the password. If the user has to be asked
+    /// first, [Receiver::disconnect], ask, and connect again with the password at hand.
+    pub fn password_required(&self) -> bool {
+        self.password_required
+    }
+
+    /// Hang up without closing the endpoint, to connect again with it
+    pub async fn disconnect(self) -> iroh::Endpoint {
+        self.conn.close(0u32.into(), &[0]);
+        self.endpoint
+    }
+
+    /// Prove to the sender that this side knows the password, and check that the sender
+    /// knows it too. Has to be called before [Receiver::receive_files] if the sender wants
+    /// a password, and with [None] it only checks that the sender wants none.
+    pub async fn authenticate(&mut self, password: Option<&str>) -> Result<(), ReceiveError> {
+        let password = match (self.password_required, password) {
+            (false, None) => return Ok(()),
+            (true, Some(password)) => password,
+            (true, None) => {
+                self.close().await;
+                return Err(PasswordError::Required.into());
+            }
+            (false, Some(_)) => {
+                send_packet(ReceiverToSender::PasswordExpected, &self.conn).await?;
+                self.wait_for_close().await;
+                return Err(PasswordError::NotExpected.into());
+            }
+        };
+
+        let sender_message = match receive_packet::<SenderToReceiver>(&self.conn).await? {
+            SenderToReceiver::Password { message } => message,
+            p => return Err(ReceiveError::UnexpectedDataPacket(p)),
+        };
+
+        let (pake, message) = password::start(Side::Receiver, password);
+        // A sender that sends no valid message does not know the password either
+        let key = pake
+            .finish(&sender_message)
+            .map_err(|_| PasswordError::Wrong)?;
+        let proof =
+            password::proof(&self.conn, &key, Side::Receiver).ok_or(PasswordError::Wrong)?;
+        send_packet(ReceiverToSender::Password { message, proof }, &self.conn).await?;
+
+        match receive_packet::<SenderToReceiver>(&self.conn).await? {
+            // The sender has to know the password as well
+            SenderToReceiver::PasswordAccepted { proof }
+                if password::verify(&self.conn, &key, Side::Sender, &proof) =>
+            {
+                self.authenticated = true;
+                Ok(())
+            }
+            SenderToReceiver::PasswordAccepted { .. } | SenderToReceiver::PasswordRejected => {
+                self.close().await;
+                Err(PasswordError::Wrong.into())
+            }
+            p => Err(ReceiveError::UnexpectedDataPacket(p)),
+        }
     }
 
     /// Close the connection
@@ -272,30 +370,41 @@ impl Receiver {
     /// * `Ok(false)` if the transfer was stopped
     pub async fn receive_files(
         &mut self,
+        initial_progress_callback: impl FnMut(&[(String, u64, u64)]),
+        accept_files_callback: impl FnMut(&[FilesAvailable]) -> Option<PathBuf>,
+        destinations_callback: impl FnMut(&[FilesAvailable], &[Destination]),
+        read_callback: &mut impl FnMut(u64),
+        should_continue: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ReceiveError> {
+        let result = self
+            .receive_files_inner(
+                initial_progress_callback,
+                accept_files_callback,
+                destinations_callback,
+                read_callback,
+                should_continue,
+            )
+            .await;
+
+        // Whatever went wrong, hang up, so the sender knows at once
+        if result.is_err() {
+            self.close().await;
+        }
+        result
+    }
+
+    async fn receive_files_inner(
+        &mut self,
         mut initial_progress_callback: impl FnMut(&[(String, u64, u64)]),
         mut accept_files_callback: impl FnMut(&[FilesAvailable]) -> Option<PathBuf>,
         mut destinations_callback: impl FnMut(&[FilesAvailable], &[Destination]),
         read_callback: &mut impl FnMut(u64),
         should_continue: &mut impl FnMut() -> bool,
     ) -> Result<bool, ReceiveError> {
-        match receive_packet::<SenderToReceiver>(&self.conn).await? {
-            SenderToReceiver::ConnRequest { version_num } => {
-                if version_num != QS_PROTO_VERSION {
-                    send_packet(
-                        ReceiverToSender::WrongVersion {
-                            expected: QS_PROTO_VERSION.to_string(),
-                        },
-                        &self.conn,
-                    )
-                    .await?;
-                    return Err(ReceiveError::WrongVersion(
-                        QS_PROTO_VERSION.to_string(),
-                        version_num,
-                    ));
-                }
-                send_packet(ReceiverToSender::Ok, &self.conn).await?;
-            }
-            p => return Err(ReceiveError::UnexpectedDataPacket(p)),
+        // A password has to be given with `authenticate` before anything is offered
+        if self.password_required && !self.authenticated {
+            self.close().await;
+            return Err(PasswordError::Required.into());
         }
 
         let files_offered = match receive_packet::<SenderToReceiver>(&self.conn).await? {

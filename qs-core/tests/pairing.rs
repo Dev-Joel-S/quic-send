@@ -82,6 +82,7 @@ async fn code_pairs_and_files_arrive() {
         let args = SenderArgs {
             files,
             expected_peer: Some(peer),
+            password: None,
         };
         let mut sender = Sender::connect(send_ep, args).await.unwrap();
         let sent = sender

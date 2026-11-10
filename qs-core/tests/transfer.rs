@@ -3,6 +3,7 @@
 use iroh::{endpoint::presets, Endpoint, EndpointAddr, RelayMode};
 use qs_core::{
     destination::{Destination, Placement},
+    password::PasswordError,
     receive::{ReceiveError, Receiver, ReceiverArgs},
     send::{SendError, Sender, SenderArgs},
     QS_ALPN,
@@ -88,6 +89,7 @@ async fn transfer(
             SenderArgs {
                 files,
                 expected_peer,
+                password: None,
             },
         )
         .await?;
@@ -377,6 +379,7 @@ async fn sender_only_serves_the_expected_receiver() {
     let args = SenderArgs {
         files: vec![src.path().join("secret.bin")],
         expected_peer: Some(good_ep.id()),
+        password: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -417,6 +420,7 @@ async fn second_receiver_is_refused() {
     let args = SenderArgs {
         files: vec![src.path().join("file.bin")],
         expected_peer: None,
+        password: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -520,6 +524,7 @@ async fn classical_receiver_is_refused() {
     let args = SenderArgs {
         files: vec![src.path().join("file.bin")],
         expected_peer: None,
+        password: None,
     };
     let send = tokio::spawn(async move {
         let mut sender = Sender::connect(send_ep, args).await?;
@@ -558,4 +563,256 @@ async fn classical_sender_is_refused() {
     let result = receive(endpoint().await, addr, out.path()).await;
     assert!(matches!(result, Err(ReceiveError::Crypto(_))), "{result:?}");
     accept.await.unwrap();
+}
+
+/// Send one small file, asking for `password`. Returns the content and the running sender.
+async fn password_sender(
+    src: &Path,
+    password: Option<&str>,
+) -> (
+    Vec<u8>,
+    EndpointAddr,
+    tokio::task::JoinHandle<Result<bool, SendError>>,
+) {
+    let data = content(9, 20_000);
+    write(&src.join("file.bin"), &data);
+
+    let send_ep = endpoint().await;
+    let addr = local_addr(&send_ep);
+    let args = SenderArgs {
+        files: vec![src.join("file.bin")],
+        expected_peer: None,
+        password: password.map(|p| zeroize::Zeroizing::new(p.to_string())),
+    };
+    let send = tokio::spawn(async move {
+        let mut sender = Sender::connect(send_ep, args).await?;
+        sender
+            .send_files(|| {}, |_| {}, |_| {}, &mut |_| {}, &mut || true)
+            .await
+    });
+
+    (data, addr, send)
+}
+
+/// Connect, give `password`, and receive into `output`
+async fn receive_with_password(
+    addr: EndpointAddr,
+    output: &Path,
+    password: Option<&str>,
+) -> Result<bool, ReceiveError> {
+    let output = output.to_path_buf();
+    let mut receiver =
+        Receiver::connect(endpoint().await, addr, ReceiverArgs { resume: true }).await?;
+    receiver.authenticate(password).await?;
+    receiver
+        .receive_files(
+            |_| {},
+            |_| Some(output.clone()),
+            |_, _| {},
+            &mut |_| {},
+            &mut || true,
+        )
+        .await
+}
+
+fn is_password_error<T: std::fmt::Debug>(
+    result: &Result<T, ReceiveError>,
+    expected: PasswordError,
+) -> bool {
+    matches!(result, Err(ReceiveError::Password(e)) if *e == expected)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_is_checked_in_direct_mode() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (data, addr, send) = password_sender(src.path(), Some("hunter2")).await;
+
+    let received = receive_with_password(addr, out.path(), Some("hunter2")).await;
+    assert!(received.unwrap());
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_password_gets_nothing_and_the_sender_keeps_waiting() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let wrong_out = tempfile::tempdir().unwrap();
+    let (data, addr, send) = password_sender(src.path(), Some("hunter2")).await;
+
+    let wrong = receive_with_password(addr.clone(), wrong_out.path(), Some("hunter3")).await;
+    assert!(is_password_error(&wrong, PasswordError::Wrong), "{wrong:?}");
+    assert!(listing(wrong_out.path()).is_empty());
+
+    // A typo does not end the transfer: the next attempt with the right password works
+    assert!(!send.is_finished());
+    let received = receive_with_password(addr, out.path(), Some("hunter2")).await;
+    assert!(received.unwrap());
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sender_gives_up_after_too_many_wrong_passwords() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (_, addr, send) = password_sender(src.path(), Some("hunter2")).await;
+
+    for guess in ["a", "b", "c"] {
+        let wrong = receive_with_password(addr.clone(), out.path(), Some(guess)).await;
+        assert!(is_password_error(&wrong, PasswordError::Wrong), "{wrong:?}");
+    }
+
+    let sent = send.await.unwrap();
+    assert!(
+        matches!(
+            sent,
+            Err(SendError::Password(PasswordError::TooManyAttempts))
+        ),
+        "{sent:?}"
+    );
+    // Now even the right password comes too late, the sender is gone
+    let late = tokio::time::timeout(
+        Duration::from_secs(3),
+        receive_with_password(addr, out.path(), Some("hunter2")),
+    )
+    .await;
+    assert!(!matches!(late, Ok(Ok(_))));
+    assert!(listing(out.path()).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_is_offered_without_the_password() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (data, addr, send) = password_sender(src.path(), Some("hunter2")).await;
+
+    // A receiver that skips the password step is not shown what would be sent
+    let output = out.path().to_path_buf();
+    let mut receiver = Receiver::connect(
+        endpoint().await,
+        addr.clone(),
+        ReceiverArgs { resume: true },
+    )
+    .await
+    .unwrap();
+    assert!(receiver.password_required());
+    let mut offered = false;
+    let skipped = receiver
+        .receive_files(
+            |_| {},
+            |_| {
+                offered = true;
+                Some(output.clone())
+            },
+            |_, _| {},
+            &mut |_| {},
+            &mut || true,
+        )
+        .await;
+    assert!(
+        is_password_error(&skipped, PasswordError::Required),
+        "{skipped:?}"
+    );
+    assert!(!offered);
+
+    // Giving none at all is refused the same way
+    let none = receive_with_password(addr.clone(), out.path(), None).await;
+    assert!(
+        is_password_error(&none, PasswordError::Required),
+        "{none:?}"
+    );
+    assert!(listing(out.path()).is_empty());
+
+    // Neither counts as a wrong guess, the sender still serves the right receiver
+    let received = receive_with_password(addr, out.path(), Some("hunter2")).await;
+    assert!(received.unwrap());
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receiver_can_ask_for_the_password_and_come_back() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (data, addr, send) = password_sender(src.path(), Some("hunter2")).await;
+
+    // First contact: learn that a password is needed, hang up to ask the user
+    let receiver = Receiver::connect(
+        endpoint().await,
+        addr.clone(),
+        ReceiverArgs { resume: true },
+    )
+    .await
+    .unwrap();
+    assert!(receiver.password_required());
+    let recv_ep = receiver.disconnect().await;
+
+    // Second contact with the same endpoint and the password at hand
+    let output = out.path().to_path_buf();
+    let mut receiver = Receiver::connect(recv_ep, addr, ReceiverArgs { resume: true })
+        .await
+        .unwrap();
+    receiver.authenticate(Some("hunter2")).await.unwrap();
+    let received = receiver
+        .receive_files(
+            |_| {},
+            |_| Some(output.clone()),
+            |_, _| {},
+            &mut |_| {},
+            &mut || true,
+        )
+        .await;
+
+    assert!(received.unwrap());
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_without_one_on_the_sender_is_reported_on_both_sides() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (_, addr, send) = password_sender(src.path(), None).await;
+
+    let result = receive_with_password(addr, out.path(), Some("hunter2")).await;
+    assert!(
+        is_password_error(&result, PasswordError::NotExpected),
+        "{result:?}"
+    );
+
+    let sent = send.await.unwrap();
+    assert!(
+        matches!(
+            sent,
+            Err(SendError::Password(PasswordError::ExpectedByReceiver))
+        ),
+        "{sent:?}"
+    );
+    assert!(listing(out.path()).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn silent_peer_does_not_keep_the_receiver_out() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (data, addr, send) = password_sender(src.path(), None).await;
+
+    // Somebody connects and then says nothing at all
+    let silent = endpoint().await;
+    let silent_conn = silent.connect(addr.clone(), QS_ALPN).await.unwrap();
+
+    // The real receiver gets its turn once the sender has given up on the silent one
+    let received = tokio::time::timeout(
+        Duration::from_secs(40),
+        receive_with_password(addr, out.path(), None),
+    )
+    .await
+    .expect("the sender must not wait for a silent peer forever");
+    assert!(received.unwrap());
+    assert!(send.await.unwrap().unwrap());
+    assert_eq!(std::fs::read(out.path().join("file.bin")).unwrap(), data);
+
+    assert!(silent_conn.close_reason().is_some());
 }

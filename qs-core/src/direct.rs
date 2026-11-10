@@ -16,8 +16,8 @@
 //!       the same [FromStr] to read). Several addresses are separated by commas.
 //! DONE: the sender can bind a fixed port (`--port`, `port` in the config file), and the
 //!       CLI prints every usable address when no relay is in use.
-//! TODO: with the optional password, run a PAKE inside the QUIC connection and bind it
-//!       to the connection with the exporter value.
+//! DONE: with the optional password a PAKE runs inside the QUIC connection, bound to it
+//!       with the exporter value, see `crate::password`.
 //! TODO: README section that says clearly: without a relay the sender must be reachable
 //!       by the receiver (same network, a forwarded port, or a public IP).
 

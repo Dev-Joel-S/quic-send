@@ -7,6 +7,7 @@ pub mod direct;
 pub mod limits;
 pub mod packets;
 pub mod pairing;
+pub mod password;
 pub mod peers;
 pub mod receive;
 pub mod send;
