@@ -2,20 +2,622 @@
 //!
 //! An untrusted mailbox. It hands out slots and passes opaque messages between the two
 //! peers of a pairing. It must not be able to do more than deny service, see
-//! `qs_core::pairing::rendezvous` for the messages and what the clients assume.
+//! `qs_core::pairing` for what the clients assume, and `qs-rendezvous-api` for the wire
+//! format.
 //!
-//! TODO: create slot: the server picks the nameplate and returns it, so senders never collide.
-//! TODO: store messages per slot: PAKE message of the sender, claim with the PAKE message
-//!       of the receiver, sealed address. Never interpret them.
-//! TODO: a slot can be claimed exactly once. A second attempt gets "already used". This
-//!       is the defense against online guessing and needs a test.
-//! TODO: remove a slot on first successful fetch, on a delete request, and after a few
-//!       minutes. Keep a short list of used and expired slot names so the clients can be
-//!       told "expired" and "already used" apart.
-//! TODO: limits: size of every message, number of slots per IP and in total, slot
-//!       creation rate. Everything in memory, nothing written to disk.
-//! TODO: long polling or a similar way for the sender to wait for the receiver.
-//! TODO: TLS is the job of a reverse proxy, document an example configuration. The
-//!       server has no secrets, but the clients' IP addresses should not travel in clear.
-//! TODO: no logging of slot names together with IP addresses.
-//! TODO: tests for the points above, including a client that behaves badly.
+//! DONE: create slot: the server picks a free nameplate at random and returns it, so
+//!       senders never collide.
+//! DONE: messages are stored per slot and never interpreted: first message of the sender,
+//!       reply of the receiver, sealed address of the sender.
+//! DONE: a slot can be claimed exactly once, a second attempt gets `slot_used`
+//!       (test `second_claim_is_refused`). This is the defense against online guessing.
+//! DONE: a slot is removed when the address was fetched, on a delete request and when it
+//!       expires. Ended slots are remembered for a while, so clients can be told `expired`,
+//!       `used` and `closed` apart from a nameplate that never existed.
+//! DONE: limits: message size, slots in total (the nameplate space) and per address,
+//!       slot creations and claims per address and minute. Everything is in memory.
+//! DONE: `GET` requests wait up to 25 seconds for a message (long polling).
+//! DONE: nothing is logged per slot, so slot names never end up next to IP addresses.
+//! DONE: tests in `tests/server.rs`, including clients that behave badly.
+//! TODO: TLS is the job of a reverse proxy. Document an example configuration in the README.
+
+use axum::{
+    extract::{rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Path, Query, State},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use qs_rendezvous_api::{
+    is_nameplate, ErrorBody, ErrorCode, Message, ServerInfo, SlotClaimed, SlotCreated, ALPHABET,
+    API_VERSION, MAX_MESSAGE_BYTES, MAX_WAIT_SECS, NAMEPLATE_LEN, SERVICE_NAME,
+};
+use serde::Deserialize;
+use std::{
+    collections::HashMap,
+    future::Future,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::sync::Notify;
+
+/// How the server behaves
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// How long a slot lives while nobody has claimed it
+    pub ttl: Duration,
+    /// How long the two peers have to finish once the slot is claimed
+    pub claimed_ttl: Duration,
+    /// How long an ended slot is remembered, to tell why it is gone
+    pub remember: Duration,
+    /// Take the client address from `X-Forwarded-For` instead of the connection
+    pub behind_proxy: bool,
+    /// Slots one address may create per minute
+    pub creates_per_minute: u32,
+    /// Claims one address may make per minute
+    pub claims_per_minute: u32,
+    /// Slots one address may have open at once
+    pub slots_per_address: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(300),
+            claimed_ttl: Duration::from_secs(120),
+            remember: Duration::from_secs(600),
+            behind_proxy: false,
+            creates_per_minute: 30,
+            claims_per_minute: 30,
+            slots_per_address: 16,
+        }
+    }
+}
+
+/// A client address for rate limiting. IPv6 addresses are counted per /64.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AddressKey(IpAddr);
+
+impl AddressKey {
+    fn new(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(_) => Self(ip),
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => Self(IpAddr::V4(v4)),
+                None => {
+                    let prefix = u128::from(v6) & !u128::from(u64::MAX);
+                    Self(IpAddr::V6(Ipv6Addr::from(prefix)))
+                }
+            },
+        }
+    }
+}
+
+struct Slot {
+    expires: Instant,
+    creator: AddressKey,
+    sender_token: String,
+    /// First message of the sender
+    hello: Vec<u8>,
+    /// Set once the slot is claimed
+    receiver_token: Option<String>,
+    /// Reply of the receiver
+    reply: Option<Vec<u8>>,
+    /// Sealed address of the sender
+    address: Option<Vec<u8>>,
+    /// Wakes requests that wait for a change of this slot
+    changed: Arc<Notify>,
+}
+
+/// Why a slot is gone
+#[derive(Debug, Clone, Copy)]
+enum Gone {
+    Used,
+    Expired,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Limited {
+    Create,
+    Claim,
+}
+
+#[derive(Default)]
+struct Inner {
+    slots: HashMap<String, Slot>,
+    gone: HashMap<String, (Gone, Instant)>,
+    /// Start of the current minute and requests in it, per address and kind
+    windows: HashMap<(AddressKey, Limited), (Instant, u32)>,
+}
+
+impl Inner {
+    /// Remove a slot and remember why. Wakes everyone waiting for it.
+    fn end(&mut self, nameplate: &str, reason: Gone, config: &Config) {
+        if let Some(slot) = self.slots.remove(nameplate) {
+            slot.changed.notify_waiters();
+            self.gone.insert(
+                nameplate.to_string(),
+                (reason, Instant::now() + config.remember),
+            );
+        }
+    }
+
+    /// Expire what is due
+    fn sweep(&mut self, config: &Config) {
+        let now = Instant::now();
+
+        let expired: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.expires <= now)
+            .map(|(nameplate, _)| nameplate.clone())
+            .collect();
+        for nameplate in expired {
+            self.end(&nameplate, Gone::Expired, config);
+        }
+
+        self.gone.retain(|_, (_, until)| *until > now);
+        self.windows
+            .retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(60));
+    }
+
+    /// The error for a slot that is not there
+    fn missing(&self, nameplate: &str) -> ApiError {
+        ApiError(match self.gone.get(nameplate) {
+            Some((Gone::Used, _)) => ErrorCode::SlotUsed,
+            Some((Gone::Expired, _)) => ErrorCode::SlotExpired,
+            Some((Gone::Closed, _)) => ErrorCode::SlotClosed,
+            None => ErrorCode::UnknownSlot,
+        })
+    }
+
+    /// Count a request against the limit of its address
+    fn allow(&mut self, address: AddressKey, kind: Limited, limit: u32) -> Result<(), ApiError> {
+        let now = Instant::now();
+        let window = self.windows.entry((address, kind)).or_insert((now, 0));
+
+        if now.duration_since(window.0) >= Duration::from_secs(60) {
+            *window = (now, 0);
+        }
+        if window.1 >= limit {
+            return Err(ApiError(ErrorCode::RateLimited));
+        }
+
+        window.1 += 1;
+        Ok(())
+    }
+
+    /// A random nameplate that is free. One that was not used recently if possible,
+    /// so a late request for an ended slot does not meet a new one.
+    fn free_nameplate(&self) -> Option<String> {
+        let all = ALPHABET.iter().flat_map(|a| {
+            ALPHABET
+                .iter()
+                .map(move |b| String::from_utf8_lossy(&[*a, *b]).into_owned())
+        });
+        let free: Vec<String> = all.filter(|n| !self.slots.contains_key(n)).collect();
+        let fresh: Vec<&String> = free
+            .iter()
+            .filter(|n| !self.gone.contains_key(*n))
+            .collect();
+
+        let pick = |len: usize| random_u64().map(|r| (r % len as u64) as usize);
+        if !fresh.is_empty() {
+            return Some(fresh[pick(fresh.len())?].clone());
+        }
+        if !free.is_empty() {
+            return Some(free[pick(free.len())?].clone());
+        }
+        None
+    }
+}
+
+struct Shared {
+    config: Config,
+    inner: Mutex<Inner>,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        // A panic while holding the lock leaves nothing half done that matters here
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.sweep(&self.config);
+        inner
+    }
+}
+
+/// An error answer
+#[derive(Debug)]
+struct ApiError(ErrorCode);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match self.0 {
+            ErrorCode::UnknownSlot => StatusCode::NOT_FOUND,
+            ErrorCode::SlotUsed => StatusCode::CONFLICT,
+            ErrorCode::SlotExpired | ErrorCode::SlotClosed => StatusCode::GONE,
+            ErrorCode::Forbidden => StatusCode::FORBIDDEN,
+            ErrorCode::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::NoFreeSlot => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
+        };
+        (status, Json(ErrorBody { error: self.0 })).into_response()
+    }
+}
+
+fn random_u64() -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+/// A token nobody can guess
+fn new_token() -> Result<String, ApiError> {
+    let mut bytes = [0u8; 16];
+    // Without randomness there is no safe token, refuse rather than hand out a weak one
+    getrandom::fill(&mut bytes).map_err(|_| ApiError(ErrorCode::NoFreeSlot))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The token of a request
+fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(ApiError(ErrorCode::Forbidden))
+}
+
+/// The address a request is counted against
+fn client_address(shared: &Shared, peer: SocketAddr, headers: &HeaderMap) -> AddressKey {
+    let forwarded = shared
+        .config
+        .behind_proxy
+        .then(|| headers.get("x-forwarded-for"))
+        .flatten()
+        .and_then(|value| value.to_str().ok())
+        // The last entry is the one the proxy itself added
+        .and_then(|value| value.rsplit(',').next())
+        .and_then(|ip| ip.trim().parse::<IpAddr>().ok());
+
+    AddressKey::new(forwarded.unwrap_or(peer.ip()))
+}
+
+/// The message of a request body, checked for its size
+fn message(body: Result<Json<Message>, JsonRejection>) -> Result<Vec<u8>, ApiError> {
+    let Json(Message { message }) = body.map_err(|_| ApiError(ErrorCode::BadRequest))?;
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(ApiError(ErrorCode::TooLarge));
+    }
+    Ok(message)
+}
+
+#[derive(Debug, Deserialize)]
+struct Wait {
+    /// Seconds to wait for the message
+    #[serde(default)]
+    wait: u64,
+}
+
+/// Tells a client that this is a rendezvous server, and which API it speaks
+async fn info() -> Json<ServerInfo> {
+    Json(ServerInfo {
+        service: SERVICE_NAME.to_string(),
+        api: API_VERSION,
+    })
+}
+
+async fn create_slot(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<Message>, JsonRejection>,
+) -> Result<(StatusCode, Json<SlotCreated>), ApiError> {
+    let hello = message(body)?;
+    let address = client_address(&shared, peer, &headers);
+    let config = &shared.config;
+
+    let mut inner = shared.lock();
+    inner.allow(address, Limited::Create, config.creates_per_minute)?;
+
+    let open = inner
+        .slots
+        .values()
+        .filter(|s| s.creator == address)
+        .count();
+    if open >= config.slots_per_address {
+        return Err(ApiError(ErrorCode::RateLimited));
+    }
+
+    let nameplate = inner
+        .free_nameplate()
+        .ok_or(ApiError(ErrorCode::NoFreeSlot))?;
+    let token = new_token()?;
+
+    inner.gone.remove(&nameplate);
+    inner.slots.insert(
+        nameplate.clone(),
+        Slot {
+            expires: Instant::now() + config.ttl,
+            creator: address,
+            sender_token: token.clone(),
+            hello,
+            receiver_token: None,
+            reply: None,
+            address: None,
+            changed: Arc::new(Notify::new()),
+        },
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SlotCreated {
+            nameplate,
+            token,
+            expires_in: config.ttl.as_secs(),
+        }),
+    ))
+}
+
+async fn claim_slot(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(nameplate): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<SlotClaimed>, ApiError> {
+    let address = client_address(&shared, peer, &headers);
+    let config = &shared.config;
+
+    let mut inner = shared.lock();
+    inner.allow(address, Limited::Claim, config.claims_per_minute)?;
+
+    if !is_nameplate(&nameplate) {
+        return Err(ApiError(ErrorCode::UnknownSlot));
+    }
+    let Some(slot) = inner.slots.get_mut(&nameplate) else {
+        return Err(inner.missing(&nameplate));
+    };
+
+    // One claim per slot. This is what limits guessing the code to one attempt.
+    if slot.receiver_token.is_some() {
+        return Err(ApiError(ErrorCode::SlotUsed));
+    }
+
+    let token = new_token()?;
+    slot.receiver_token = Some(token.clone());
+    slot.expires = slot.expires.max(Instant::now() + config.claimed_ttl);
+    slot.changed.notify_waiters();
+
+    Ok(Json(SlotClaimed {
+        message: slot.hello.clone(),
+        token,
+        expires_in: slot
+            .expires
+            .saturating_duration_since(Instant::now())
+            .as_secs(),
+    }))
+}
+
+/// Who a token belongs to
+#[derive(PartialEq)]
+enum Party {
+    Sender,
+    Receiver,
+}
+
+fn party(slot: &Slot, token: &str) -> Result<Party, ApiError> {
+    if slot.sender_token == token {
+        Ok(Party::Sender)
+    } else if slot.receiver_token.as_deref() == Some(token) {
+        Ok(Party::Receiver)
+    } else {
+        Err(ApiError(ErrorCode::Forbidden))
+    }
+}
+
+async fn put_reply(
+    State(shared): State<Arc<Shared>>,
+    Path(nameplate): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<Message>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let reply = message(body)?;
+    let token = bearer(&headers)?;
+
+    let mut inner = shared.lock();
+    let Some(slot) = inner.slots.get_mut(&nameplate) else {
+        return Err(inner.missing(&nameplate));
+    };
+    if party(slot, token)? != Party::Receiver {
+        return Err(ApiError(ErrorCode::Forbidden));
+    }
+    if slot.reply.is_some() {
+        return Err(ApiError(ErrorCode::BadRequest));
+    }
+
+    slot.reply = Some(reply);
+    slot.changed.notify_waiters();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn put_address(
+    State(shared): State<Arc<Shared>>,
+    Path(nameplate): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<Message>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let address = message(body)?;
+    let token = bearer(&headers)?;
+
+    let mut inner = shared.lock();
+    let Some(slot) = inner.slots.get_mut(&nameplate) else {
+        return Err(inner.missing(&nameplate));
+    };
+    if party(slot, token)? != Party::Sender {
+        return Err(ApiError(ErrorCode::Forbidden));
+    }
+    // The address answers the reply, and is set once
+    if slot.reply.is_none() || slot.address.is_some() {
+        return Err(ApiError(ErrorCode::BadRequest));
+    }
+
+    slot.address = Some(address);
+    slot.changed.notify_waiters();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Wait until `ready` returns a message for the slot, or the time is up
+async fn wait_for(
+    shared: &Shared,
+    nameplate: &str,
+    wait: u64,
+    mut ready: impl FnMut(&mut Inner) -> Result<Option<Vec<u8>>, ApiError>,
+) -> Result<Response, ApiError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait.min(MAX_WAIT_SECS));
+
+    loop {
+        let changed = {
+            let mut inner = shared.lock();
+            if let Some(message) = ready(&mut inner)? {
+                return Ok(Json(Message { message }).into_response());
+            }
+            match inner.slots.get(nameplate) {
+                Some(slot) => slot.changed.clone(),
+                None => return Err(inner.missing(nameplate)),
+            }
+        };
+
+        // A change between the check above and here is not lost: the next round of the
+        // loop checks again, at the latest when the short sleep below ends.
+        tokio::select! {
+            _ = changed.notified() => {}
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            _ = tokio::time::sleep_until(deadline) => {
+                return Ok(StatusCode::NO_CONTENT.into_response());
+            }
+        }
+    }
+}
+
+async fn get_reply(
+    State(shared): State<Arc<Shared>>,
+    Path(nameplate): Path<String>,
+    Query(Wait { wait }): Query<Wait>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let token = bearer(&headers)?.to_string();
+
+    wait_for(&shared, &nameplate, wait, |inner| {
+        let Some(slot) = inner.slots.get(&nameplate) else {
+            return Err(inner.missing(&nameplate));
+        };
+        if party(slot, &token)? != Party::Sender {
+            return Err(ApiError(ErrorCode::Forbidden));
+        }
+        Ok(slot.reply.clone())
+    })
+    .await
+}
+
+async fn get_address(
+    State(shared): State<Arc<Shared>>,
+    Path(nameplate): Path<String>,
+    Query(Wait { wait }): Query<Wait>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let token = bearer(&headers)?.to_string();
+    let config = shared.config.clone();
+
+    wait_for(&shared, &nameplate, wait, |inner| {
+        let Some(slot) = inner.slots.get(&nameplate) else {
+            return Err(inner.missing(&nameplate));
+        };
+        if party(slot, &token)? != Party::Receiver {
+            return Err(ApiError(ErrorCode::Forbidden));
+        }
+        let Some(address) = slot.address.clone() else {
+            return Ok(None);
+        };
+
+        // Delivered: the slot has done its job
+        inner.end(&nameplate, Gone::Used, &config);
+        Ok(Some(address))
+    })
+    .await
+}
+
+async fn delete_slot(
+    State(shared): State<Arc<Shared>>,
+    Path(nameplate): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let token = bearer(&headers)?;
+
+    let mut inner = shared.lock();
+    let Some(slot) = inner.slots.get(&nameplate) else {
+        // Already gone is what the caller wanted
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    party(slot, token)?;
+
+    inner.end(&nameplate, Gone::Closed, &shared.config);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The routes of the server
+fn router(shared: Arc<Shared>) -> Router {
+    Router::new()
+        .route("/v1", get(info))
+        .route("/v1/slots", post(create_slot))
+        .route("/v1/slots/{nameplate}", axum::routing::delete(delete_slot))
+        .route("/v1/slots/{nameplate}/claim", post(claim_slot))
+        .route("/v1/slots/{nameplate}/reply", get(get_reply).put(put_reply))
+        .route(
+            "/v1/slots/{nameplate}/address",
+            get(get_address).put(put_address),
+        )
+        // Base64 and JSON around the largest message, with room to spare
+        .layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES * 2))
+        .with_state(shared)
+}
+
+/// Serve on `listener` until `shutdown` completes
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    config: Config,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    debug_assert_eq!(
+        NAMEPLATE_LEN, 2,
+        "free_nameplate builds two character names"
+    );
+
+    let shared = Arc::new(Shared {
+        config,
+        inner: Mutex::new(Inner::default()),
+    });
+
+    // Slots also expire while nobody asks for them, so waiting requests get an answer
+    let sweeper = tokio::spawn({
+        let shared = shared.clone();
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                drop(shared.lock());
+            }
+        }
+    });
+
+    let result = axum::serve(
+        listener,
+        router(shared).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await;
+
+    sweeper.abort();
+    result
+}
