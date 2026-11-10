@@ -1,41 +1,50 @@
-use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use dialoguer::theme::ColorfulTheme;
-use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use iroh::{endpoint::presets, Endpoint, EndpointAddr, RelayMode, SecretKey};
+use config::{Config, NetworkArgs, RelaySetting, Settings};
+use iroh::SecretKey;
 use qs_core::{
-    common::{ConnectionPath, FilesAvailable},
-    destination::{Destination, Placement},
-    receive::{ReceiveError, Receiver, ReceiverArgs},
+    direct::Ticket,
+    receive::{Receiver, ReceiverArgs},
     send::{SendError, Sender, SenderArgs},
-    QuicSendError, QS_ALPN, QS_PROTO_VERSION,
+    QS_PROTO_VERSION,
 };
 use std::{
     cell::RefCell,
     io::{self, IsTerminal, Write},
     path::PathBuf,
+    process::ExitCode,
     rc::Rc,
+    str::FromStr,
     time::Duration,
 };
-use thiserror::Error;
 use tracing::Level;
 use tracing_subscriber::{
     filter::{LevelFilter, Targets},
     layer::SubscriberExt,
     util::SubscriberInitExt,
 };
+use ui::CliProgressBars;
 
 mod config;
 mod drop;
+mod net;
 mod password;
+mod ui;
 
 #[derive(Parser, Debug)]
 #[clap(version = QS_PROTO_VERSION, author = env!("CARGO_PKG_AUTHORS"))]
 struct Args {
     /// Log level
-    #[clap(long, short, default_value = "error")]
+    #[clap(long, short, default_value = "error", global = true)]
     log_level: tracing::Level,
+
+    /// Use this config file instead of the default one
+    #[clap(long, value_name = "FILE", global = true)]
+    config: Option<PathBuf>,
+
+    #[clap(flatten)]
+    network: NetworkArgs,
+
     /// Send or receive files
     #[clap(subcommand)]
     mode: Mode,
@@ -48,6 +57,10 @@ enum Mode {
         /// Files/directories to send. Leave out to drag them into the terminal instead
         #[clap(name = "files or directories")]
         files: Vec<PathBuf>,
+
+        /// Print a ticket with address and key instead of using the rendezvous server
+        #[clap(long)]
+        direct: bool,
     },
     #[clap(name = "receive", about = "Receive files", aliases = &["r"])]
     Receive {
@@ -55,37 +68,35 @@ enum Mode {
         #[clap(long, short = 'f')]
         overwrite: bool,
 
-        /// Output directory [default: your Downloads folder]
+        /// Output directory [default: from the config file, else your Downloads folder]
         #[clap(long, short)]
         output: Option<PathBuf>,
 
-        /// The code to connect to the sender
+        /// Save into the directory you are in, same as `-o .`
+        #[clap(long, conflicts_with = "output")]
+        here: bool,
+
+        /// The ticket of the sender
         code: Option<String>,
 
         /// Automatically accept the files
         #[clap(long, short = 'y')]
         auto_accept: bool,
     },
+    #[clap(
+        name = "config",
+        about = "Show the config file and the settings in effect"
+    )]
+    Config,
 }
 
-/// How long the sender waits for a relay before printing its ticket anyway
-const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the sender waits for any address after that
-const ADDR_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Error, Debug)]
-enum AppError {
-    #[error("send error: {0}")]
-    QuicSendCore(#[from] qs_core::QuicSendError),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-}
+/// An error to show to the user as it is, without a backtrace
+type Failure = Box<dyn std::error::Error>;
 
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    let mut args: Args = Args::parse();
+async fn main() -> ExitCode {
+    let args: Args = Args::parse();
 
-    color_eyre::install()?;
     // Dependencies (mostly iroh) only log when debugging,
     // their errors on shutdown are noise for everyone else.
     let level = args.log_level;
@@ -107,231 +118,266 @@ async fn main() -> color_eyre::Result<()> {
     // Make sure colors work correctly in cmd.exe.
     #[cfg(windows)]
     {
-        colored::control::set_virtual_terminal(true).unwrap();
+        let _ = colored::control::set_virtual_terminal(true);
     }
 
     tracing::debug!("qs {}", QS_PROTO_VERSION);
 
-    // Paths may have been dragged into the terminal
-    match &mut args.mode {
-        Mode::Send { files } => {
-            *files = files.drain(..).map(drop::normalize_path_arg).collect();
-        }
-        Mode::Receive { output, .. } => {
-            *output = output.take().map(drop::normalize_path_arg);
+    match run(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            ExitCode::FAILURE
         }
     }
+}
 
-    // Without arguments, files are dragged into the terminal
-    if let Mode::Send { files } = &mut args.mode {
-        if files.is_empty() {
-            if !io::stdin().is_terminal() {
-                return Err(color_eyre::eyre::eyre!(
-                    "no files or directories to send given"
-                ));
-            }
-            *files = drop::select_files_interactively()?;
-            if files.is_empty() {
-                return Err(color_eyre::eyre::eyre!("no files or directories selected"));
-            }
-            println!();
-        }
-    }
-
-    // Check if the files even exist
-    if let Mode::Send { files, .. } = &args.mode {
-        for file in files {
-            if !file.exists() {
-                return Err(QuicSendError::Send(SendError::FileDoesNotExists(file.clone())).into());
-            }
-        }
-    }
-
-    // TODO: flags `--relay <default|disabled|url>` and `--port <n>`. With the relay disabled do
-    // not wait for one below (ONLINE_TIMEOUT), print the local addresses at once.
-    // TODO: build the endpoint from the config file (`config`) and the flags: relay mode
-    // (default, custom url, disabled) and the aws-lc-rs provider with the hybrid key exchange
-    // from `qs_core::crypto`. Today the relay mode and the provider are fixed here.
-    let endpoint = Endpoint::builder(presets::Empty)
-        .crypto_provider(qs_core::crypto::provider())
-        .secret_key(SecretKey::generate())
-        .alpns(vec![QS_ALPN.to_vec()])
-        .relay_mode(RelayMode::Default)
-        .bind()
-        .await
-        .map_err(|e| AppError::QuicSendCore(QuicSendError::Bind(e.to_string())))?;
-
-    let progress_bars: Rc<RefCell<Option<CliProgressBars>>> = Rc::new(RefCell::new(None));
-    let rc_clone = Rc::clone(&progress_bars);
+async fn run(args: Args) -> Result<(), Failure> {
+    let (config, config_path) = Config::load(args.config.as_deref())?;
 
     match args.mode {
-        Mode::Send { files } => {
-            // TODO: with a rendezvous url configured, do not print the ticket. Create a slot, show
-            // the short code (`qs_core::pairing::code`), and finish the pairing before connecting.
-            // The ticket below stays as `--direct` (`qs_core::direct`), and its encoding moves
-            // into qs-core. Ask for the optional password through `password` before pairing.
-            // Wait until a relay is reachable, so the address is dialable from the internet.
-            // Without a network this never happens, the local address is still printed then.
-            if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
-                .await
-                .is_err()
-            {
-                tracing::warn!("no relay reachable, the ticket only has direct addresses");
-            }
-
-            // Local addresses can show up a moment after binding
-            let mut addr = endpoint.addr();
-            let deadline = tokio::time::Instant::now() + ADDR_TIMEOUT;
-            while addr.is_empty() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                addr = endpoint.addr();
-            }
-            if addr.is_empty() {
-                return Err(
-                    AppError::QuicSendCore(QuicSendError::Send(SendError::EndpointAddr(
-                        "neither a relay nor a local network address is available".to_string(),
-                    )))
-                    .into(),
-                );
-            }
-            let serialized = postcard::to_stdvec(&addr).map_err(|e| {
-                AppError::QuicSendCore(QuicSendError::Send(SendError::EndpointAddr(e.to_string())))
-            })?;
-            let ticket: String = BASE64_STANDARD_NO_PAD.encode(&serialized);
-
-            // On Linux the clipboard content is gone once this is dropped,
-            // so it is kept alive until the transfer is over.
-            let clipboard = copy_to_clipboard(&ticket);
-
-            if clipboard.is_some() {
-                println!(
-                    "Ticket (copied to your clipboard):\n\n{}\n",
-                    ticket.bright_white()
-                );
-            } else {
-                println!("Ticket:\n\n{}\n", ticket.bright_white());
-            }
-            println!("on the other peer, run the following command:\n");
-            println!("{}", "qs receive <ticket>".yellow());
-
-            let sender_args = SenderArgs {
-                files,
-                expected_peer: None,
-            };
-            let mut sender = Sender::connect(endpoint, sender_args).await?;
-
-            // Give iroh some time to switch the connection to direct
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            let conn_type = sender.connection_type();
-            tracing::debug!("connected with type: {:?}", conn_type);
-            println!("Connection type: {}", connection_type_info_msg(conn_type));
-
-            sender
-                .send_files(
-                    || {
-                        print!("Waiting for the other peer to accept the files...");
-                        io::stdout().flush().unwrap();
-                    },
-                    |_accepted| {},
-                    |initial_progress| {
-                        println!("\r{}", " ".repeat(49));
-                        *rc_clone.borrow_mut() = Some(CliProgressBars::new(initial_progress));
-                    },
-                    &mut |last_sent| {
-                        if let Some(pb) = &mut *rc_clone.borrow_mut() {
-                            pb.update(last_sent);
-                        }
-                    },
-                    // In the CLI we don't handle the interruption as the user can just Ctrl+C
-                    &mut || true,
-                )
-                .await
-                .map_err(QuicSendError::Send)?;
-
-            drop(clipboard);
+        Mode::Send { files, direct } => {
+            let settings = Settings::resolve(&args.network, None, config);
+            send(settings, files, direct).await
         }
         Mode::Receive {
             overwrite,
             output,
+            here,
             code,
             auto_accept,
         } => {
-            let output = resolve_output_dir(output)?;
-            println!(
-                "Files will be saved to: {}\n",
-                output.display().to_string().bright_white()
-            );
-
-            let ticket = match code {
-                Some(code) => code,
-                None => dialoguer::Input::new()
-                    .with_prompt("Enter the ticket to connect")
-                    .interact()?,
+            // Paths may have been dragged into the terminal
+            let output = if here {
+                Some(PathBuf::from("."))
+            } else {
+                output.map(drop::normalize_path_arg)
             };
+            let settings = Settings::resolve(&args.network, output, config);
+            receive(settings, code, overwrite, auto_accept).await
+        }
+        Mode::Config => {
+            let settings = Settings::resolve(&args.network, None, config);
+            show_config(&settings, config_path.as_deref())
+        }
+    }
+}
 
-            // TODO: accept a short code here as well as a ticket, tell them apart by length and
-            // format. Errors must separate wrong code, slot expired, slot already used and server
-            // unreachable. `--direct <ticket>` is the explicit form for the ticket.
-            let invalid =
-                || AppError::QuicSendCore(QuicSendError::Receive(ReceiveError::InvalidCode));
-            let ticket = BASE64_STANDARD_NO_PAD
-                .decode(ticket.trim().as_bytes())
-                .map_err(|_| invalid())?;
-            let addr: EndpointAddr = postcard::from_bytes(&ticket).map_err(|_| invalid())?;
+async fn send(settings: Settings, files: Vec<PathBuf>, _direct: bool) -> Result<(), Failure> {
+    // Paths may have been dragged into the terminal
+    let mut files: Vec<PathBuf> = files.into_iter().map(drop::normalize_path_arg).collect();
 
-            let receiver_args = ReceiverArgs { resume: !overwrite };
-            let mut receiver = Receiver::connect(endpoint, addr, receiver_args).await?;
+    // Without arguments, files are dragged into the terminal
+    if files.is_empty() {
+        if !io::stdin().is_terminal() {
+            return Err("no files or directories to send given".into());
+        }
+        files = drop::select_files_interactively()?;
+        if files.is_empty() {
+            return Err("no files or directories selected".into());
+        }
+        println!();
+    }
 
-            // Give iroh some time to switch the connection to direct
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            let conn_type = receiver.connection_type();
-            tracing::debug!("connected with type: {:?}", conn_type);
-            println!("Connection type: {}", connection_type_info_msg(conn_type));
+    // Check if the files even exist
+    if let Some(missing) = files.iter().find(|file| !file.exists()) {
+        return Err(SendError::FileDoesNotExists(missing.clone()).into());
+    }
 
-            receiver
-                .receive_files(
-                    |initial_progress| {
-                        *progress_bars.borrow_mut() = Some(CliProgressBars::new(initial_progress));
-                    },
-                    |files_offered| {
-                        if auto_accept {
-                            println!("auto accepting files");
-                            tracing::debug!("auto accepting files");
-                            Some(output.clone())
-                        } else if accept_files(files_offered) {
-                            Some(output.clone())
-                        } else {
-                            None
-                        }
-                    },
-                    print_destinations,
-                    &mut |last_received| {
-                        if let Some(pb) = &mut *progress_bars.borrow_mut() {
-                            pb.update(last_received);
-                        }
-                    },
-                    // In the CLI we don't handle the interruption as the user can just Ctrl+C
-                    &mut || true,
-                )
-                .await
-                .map_err(QuicSendError::Receive)?;
+    let endpoint = net::bind(&settings, SecretKey::generate()).await?;
+    let addr = net::own_addr(&endpoint, &settings.relay).await?;
+
+    // TODO: with a rendezvous url configured and without `--direct`, do not print the
+    // ticket. Create a slot, show the short code (`qs_core::pairing::code`), and finish the
+    // pairing before connecting. Ask for the optional password through `password` first.
+    let ticket = Ticket::new(addr)?;
+    let text = ticket.to_string();
+
+    // On Linux the clipboard content is gone once this is dropped,
+    // so it is kept alive until the transfer is over.
+    let clipboard = ui::copy_to_clipboard(&text);
+
+    if clipboard.is_some() {
+        println!(
+            "Ticket (copied to your clipboard):\n\n{}\n",
+            text.bright_white()
+        );
+    } else {
+        println!("Ticket:\n\n{}\n", text.bright_white());
+    }
+
+    // Without a relay the plain addresses are all there is, and short enough to type
+    if settings.relay == RelaySetting::Disabled {
+        println!("or, typed by hand, one of:\n");
+        for line in ticket.typable() {
+            println!("{}", line.bright_white());
+        }
+        println!();
+    }
+
+    println!("on the other peer, run the following command:\n");
+    println!("{}\n", "qs receive <ticket>".yellow());
+    println!("This device: {}", endpoint.id().fmt_short());
+
+    let sender_args = SenderArgs {
+        files,
+        expected_peer: None,
+    };
+    let mut sender = Sender::connect(endpoint, sender_args).await?;
+    println!("Receiver:    {}", sender.remote_id().fmt_short());
+
+    // Give iroh some time to switch the connection to direct
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let conn_type = sender.connection_type();
+    tracing::debug!("connected with type: {:?}", conn_type);
+    println!(
+        "Connection type: {}",
+        ui::connection_type_info_msg(conn_type)
+    );
+
+    let progress_bars: Rc<RefCell<Option<CliProgressBars>>> = Rc::new(RefCell::new(None));
+    let rc_clone = Rc::clone(&progress_bars);
+
+    sender
+        .send_files(
+            || {
+                print!("Waiting for the other peer to accept the files...");
+                let _ = io::stdout().flush();
+            },
+            |_accepted| {},
+            |initial_progress| {
+                println!("\r{}", " ".repeat(49));
+                *rc_clone.borrow_mut() = Some(CliProgressBars::new(initial_progress));
+            },
+            &mut |last_sent| {
+                if let Some(pb) = &mut *progress_bars.borrow_mut() {
+                    pb.update(last_sent);
+                }
+            },
+            // In the CLI we don't handle the interruption as the user can just Ctrl+C
+            &mut || true,
+        )
+        .await?;
+
+    std::mem::drop(clipboard);
+    Ok(())
+}
+
+async fn receive(
+    settings: Settings,
+    code: Option<String>,
+    overwrite: bool,
+    auto_accept: bool,
+) -> Result<(), Failure> {
+    let output = resolve_output_dir(settings.output_dir.clone())?;
+    println!(
+        "Files will be saved to: {}\n",
+        output.display().to_string().bright_white()
+    );
+
+    let input = match code {
+        Some(code) => code,
+        None => dialoguer::Input::new()
+            .with_prompt("Enter the ticket to connect")
+            .interact()?,
+    };
+
+    // TODO: accept a short code here as well as a ticket, tell them apart by length and
+    // format. Errors must separate wrong code, slot expired, slot already used and server
+    // unreachable.
+    let ticket = Ticket::from_str(&input)?;
+
+    let endpoint = net::bind(&settings, SecretKey::generate()).await?;
+    println!("This device: {}", endpoint.id().fmt_short());
+
+    let receiver_args = ReceiverArgs { resume: !overwrite };
+    let mut receiver = Receiver::connect(endpoint, ticket.into_addr(), receiver_args).await?;
+    println!("Sender:      {}", receiver.remote_id().fmt_short());
+
+    // Give iroh some time to switch the connection to direct
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let conn_type = receiver.connection_type();
+    tracing::debug!("connected with type: {:?}", conn_type);
+    println!(
+        "Connection type: {}",
+        ui::connection_type_info_msg(conn_type)
+    );
+
+    let progress_bars: Rc<RefCell<Option<CliProgressBars>>> = Rc::new(RefCell::new(None));
+    let rc_clone = Rc::clone(&progress_bars);
+
+    receiver
+        .receive_files(
+            |initial_progress| {
+                *rc_clone.borrow_mut() = Some(CliProgressBars::new(initial_progress));
+            },
+            |files_offered| {
+                if auto_accept {
+                    println!("auto accepting files");
+                    tracing::debug!("auto accepting files");
+                    Some(output.clone())
+                } else if ui::accept_files(files_offered) {
+                    Some(output.clone())
+                } else {
+                    None
+                }
+            },
+            ui::print_destinations,
+            &mut |last_received| {
+                if let Some(pb) = &mut *progress_bars.borrow_mut() {
+                    pb.update(last_received);
+                }
+            },
+            // In the CLI we don't handle the interruption as the user can just Ctrl+C
+            &mut || true,
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// Print where the config file is and which settings are in effect
+fn show_config(settings: &Settings, path: Option<&std::path::Path>) -> Result<(), Failure> {
+    match path {
+        Some(path) if path.exists() => println!("Config file: {}", path.display()),
+        Some(path) => println!("Config file: {} (not created yet)", path.display()),
+        None => println!("Config file: no config directory on this system"),
+    }
+
+    println!("\nSettings in effect:");
+    println!(
+        "  rendezvous_url = {}",
+        match &settings.rendezvous_url {
+            Some(url) => url.clone(),
+            None => "(none, tickets instead of short codes)".to_string(),
+        }
+    );
+    println!("  relay          = {}", settings.relay);
+    println!(
+        "  output_dir     = {}",
+        std::path::absolute(output_dir(settings.output_dir.clone()))?.display()
+    );
+    println!(
+        "  port           = {}",
+        match settings.port {
+            Some(port) => port.to_string(),
+            None => "(random)".to_string(),
+        }
+    );
+
+    if !settings.known_peers.is_empty() {
+        println!("\nKnown peers:");
+        for (alias, id) in &settings.known_peers {
+            println!("  {alias} = {id}");
         }
     }
 
     Ok(())
 }
 
-/// Put `text` on the clipboard. Returns the clipboard handle on success.
-fn copy_to_clipboard(text: &str) -> Option<arboard::Clipboard> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    clipboard.set_text(text).ok()?;
-    Some(clipboard)
-}
-
-/// The output directory: the one given, or the Downloads folder.
-/// Created if missing and returned as an absolute path.
-fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
-    let output = output.unwrap_or_else(|| {
+/// The output directory: the one given, or the Downloads folder
+fn output_dir(output: Option<PathBuf>) -> PathBuf {
+    output.unwrap_or_else(|| {
         dirs::download_dir()
             // Minimal setups often have no XDG user dirs configured
             .or_else(|| {
@@ -340,176 +386,13 @@ fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
                     .filter(|d| d.is_dir())
             })
             .unwrap_or_else(|| PathBuf::from("."))
-    });
+    })
+}
 
+/// The output directory, created if missing and as an absolute path.
+/// A relative path, like `.`, is relative to the directory qs was started in.
+fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
+    let output = output_dir(output);
     std::fs::create_dir_all(&output)?;
     std::path::absolute(output)
-}
-
-/// Show where each offered file/dir ends up, if that is not obvious
-// TODO: show a short fingerprint of the peer's `EndpointId` when accepting, so a
-// direct-mode user can compare it over another channel.
-fn print_destinations(offered: &[FilesAvailable], destinations: &[Destination]) {
-    for (offered, destination) in offered.iter().zip(destinations) {
-        let name = destination
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-
-        let note = match destination.placement {
-            Placement::New if name == offered.name() => continue,
-            Placement::New => "name already taken, saving under a new name".yellow(),
-            Placement::Resume => "resuming".green(),
-            Placement::Overwrite => "overwriting".yellow(),
-        };
-
-        println!(" - {} ({})", name.blue(), note);
-    }
-}
-
-/// Ask the receiver if they want to accept the files
-fn accept_files(files_offered: &[FilesAvailable]) -> bool {
-    println!("The following files will be received:\n");
-
-    let longest_name = files_offered
-        .iter()
-        .map(|f| f.name().len())
-        .max()
-        .unwrap_or(0)
-        + 1;
-
-    let total_size = files_offered.iter().map(|f| f.size()).sum::<u64>();
-
-    for file in files_offered {
-        let size = file.size();
-        let size_human_bytes = HumanBytes(size).to_string();
-        let name = file.name();
-
-        println!(
-            " - {:<width$} {:>10}",
-            if let FilesAvailable::Dir { .. } = file {
-                format!("{}/", name).blue()
-            } else {
-                format!("{} ", name).blue()
-            },
-            size_human_bytes.red(),
-            width = longest_name
-        );
-    }
-
-    println!("\nTotal size: {}", HumanBytes(total_size).to_string().red());
-
-    dialoguer::Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Do you want to receive these files?")
-        .interact()
-        .unwrap_or_default()
-}
-
-/// Send and receive progress bars
-struct CliProgressBars {
-    /// Per file/dir progress bars
-    progerss_bars: Vec<ProgressBar>,
-    /// Only used when multiple files are sent
-    total_bar: Option<ProgressBar>,
-}
-
-impl CliProgressBars {
-    /// Creates the progress bars using the callbacks in
-    /// [qs_core::send::Sender::send_files] and [qs_core::receive::Receiver::receive_files]
-    /// # Arguments
-    /// * `callback_data` - The initial progress data for each file (name, current, total)
-    fn new(callback_data: &[(String, u64, u64)]) -> Self {
-        let total_name = "Total";
-
-        let style = ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} {prefix} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap()
-            .progress_chars("#>-");
-
-        let total_style = ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} {prefix} [{bar:40.yellow/yellow}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap()
-            .progress_chars("#>-");
-
-        let (mut longest_name, total_progress, total_size) = callback_data.iter().fold(
-            (0, 0, 0),
-            |(longest_name, total_progress, total_size), (name, progress, size)| {
-                (
-                    longest_name.max(name.len()),
-                    total_progress + progress,
-                    total_size + size,
-                )
-            },
-        );
-
-        longest_name = longest_name.max(total_name.len());
-
-        let mp = MultiProgress::new();
-
-        let mut bars = Vec::new();
-        for (name, progress, size) in callback_data {
-            let pb = mp.add(ProgressBar::new(*size));
-            pb.set_prefix(format!("{:<width$}", name, width = longest_name));
-            pb.set_style(style.clone());
-            pb.set_position(*progress);
-            pb.reset_eta();
-            bars.push(pb);
-        }
-
-        let total_bar = if bars.len() > 1 {
-            let pb = mp.add(ProgressBar::new(total_size));
-            pb.set_prefix(format!("{:<width$}", total_name, width = longest_name));
-            pb.set_style(total_style);
-            pb.set_position(total_progress);
-            pb.reset_eta();
-            Some(pb)
-        } else {
-            None
-        };
-
-        Self {
-            progerss_bars: bars,
-            total_bar,
-        }
-    }
-
-    /// Update the progress bars
-    /// it is expected that the files will be downloaded in order
-    pub fn update(&mut self, mut progress: u64) {
-        if let Some(pb) = &self.total_bar {
-            pb.inc(progress);
-        }
-
-        for pb in &self.progerss_bars {
-            let remaining = pb
-                .length()
-                .unwrap_or_default()
-                .saturating_sub(pb.position());
-
-            if remaining == 0 {
-                continue;
-            }
-
-            let this_bar_progress = progress.min(remaining);
-            pb.inc(this_bar_progress);
-            progress -= this_bar_progress;
-
-            if progress == 0 {
-                break;
-            }
-        }
-    }
-}
-
-fn connection_type_info_msg(connection_type: ConnectionPath) -> String {
-    match connection_type {
-        ConnectionPath::Direct => "Direct".green().to_string(),
-        ConnectionPath::Relay => "Relay".red().to_string(),
-        ConnectionPath::Unknown => "???".red().to_string(),
-    }
 }
