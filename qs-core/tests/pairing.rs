@@ -332,3 +332,44 @@ async fn stranger_who_grabs_the_slot_learns_nothing() {
     assert_eq!(result, Err(PairingError::Rejected));
     assert_eq!(send.await.unwrap(), Err(PairingError::ReceiverWrongCode));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redirects_are_not_followed() {
+    use axum::{response::Redirect, routing::post, Router};
+
+    let real = server(Config::default()).await;
+    let ep = endpoint().await;
+
+    // A server that sends every client on to another one
+    let target = format!("{real}/v1/slots");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirecting = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/slots",
+        post(move || {
+            let target = target.clone();
+            async move { Redirect::temporary(&target) }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let result = Offer::create(&client(&redirecting, &ep), None).await;
+    assert!(
+        matches!(result.err(), Some(PairingError::Protocol { .. })),
+        "a redirect must not be followed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_http_over_a_network_is_pointed_out() {
+    let ep = endpoint().await;
+    let unprotected = |url: &str| client(url, &ep).is_unprotected();
+
+    assert!(unprotected("http://rendezvous.example.com"));
+    assert!(unprotected("http://192.168.1.5:8080"));
+    assert!(!unprotected("https://rendezvous.example.com"));
+    // On the same machine there is no network to listen on
+    assert!(!unprotected("http://127.0.0.1:8080"));
+    assert!(!unprotected("http://localhost:8080"));
+    assert!(!unprotected("http://[::1]:8080"));
+}

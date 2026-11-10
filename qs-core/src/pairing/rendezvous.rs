@@ -22,6 +22,8 @@
 //! DONE: errors are told apart: wrong code, expired, already used, server unreachable,
 //!       not a rendezvous server or another protocol version (see `super::PairingError`).
 //! DONE: both sides delete the slot when a pairing fails ([Client::delete]).
+//! DONE: redirects are not followed, and a server reached over plain `http` is pointed out
+//!       ([Client::is_unprotected]).
 //! DONE: timeouts for every request, an answer larger than expected is refused, and a
 //!       slot can be given up from outside (`super::SlotHandle`), which the CLI does on
 //!       Ctrl+C.
@@ -83,6 +85,8 @@ impl Client {
             .tls_backend_preconfigured(tls)
             .user_agent(concat!("quic-send/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
+            // The server is not trusted to send this client anywhere else
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
 
@@ -92,6 +96,25 @@ impl Client {
     /// The url of the server
     pub fn url(&self) -> &str {
         &self.base
+    }
+
+    /// Whether the server is reached without TLS over a network.
+    ///
+    /// What is exchanged stays sealed either way, but without TLS anyone on the way sees
+    /// the slot tokens and can disturb the pairing.
+    pub fn is_unprotected(&self) -> bool {
+        let Ok(url) = reqwest::Url::parse(&self.base) else {
+            return false;
+        };
+        let local = match url.host_str() {
+            Some("localhost") => true,
+            Some(host) => host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()),
+            None => false,
+        };
+        url.scheme() == "http" && !local
     }
 
     fn url_for(&self, path: &str) -> String {

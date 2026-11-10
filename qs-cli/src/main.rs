@@ -323,11 +323,21 @@ impl PeerOptions {
 
 /// The client for the rendezvous server in `settings`, if one is set
 fn rendezvous(settings: &Settings, endpoint: &Endpoint) -> Result<Option<Client>, PairingError> {
-    settings
+    let client = settings
         .rendezvous_url
         .as_deref()
         .map(|url| Client::new(url, endpoint.tls_config().clone()))
-        .transpose()
+        .transpose()?;
+
+    if client.as_ref().is_some_and(Client::is_unprotected) {
+        eprintln!(
+            "{} the rendezvous server is reached without TLS. What is exchanged stays \
+             sealed, but the pairing can be watched and disturbed on the way. Use https.",
+            "note:".yellow().bold()
+        );
+    }
+
+    Ok(client)
 }
 
 async fn send(
