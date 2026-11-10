@@ -5,6 +5,7 @@ use crate::{
         connection_path, get_files_available, receive_packet, send_packet, ConnectionPath,
         FileSendRecvTree, FilesAvailable, PacketRecvError,
     },
+    crypto::ensure_post_quantum,
     limits::{check_offer, LimitError},
     packets::{ReceiverToSender, SenderToReceiver},
     BUF_SIZE, QS_PROTO_VERSION,
@@ -210,6 +211,12 @@ impl Sender {
                     continue;
                 }
             };
+
+            if let Err(e) = ensure_post_quantum(&conn) {
+                tracing::warn!("refused a connection: {e}");
+                conn.close(2u32.into(), b"post-quantum key exchange required");
+                continue;
+            }
 
             match args.expected_peer {
                 Some(expected) if conn.remote_id() != expected => {

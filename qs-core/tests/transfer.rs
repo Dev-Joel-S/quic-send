@@ -18,7 +18,12 @@ use std::{
 };
 
 async fn endpoint() -> Endpoint {
-    Endpoint::builder(presets::Minimal)
+    endpoint_with(qs_core::crypto::provider()).await
+}
+
+async fn endpoint_with(provider: Arc<rustls::crypto::CryptoProvider>) -> Endpoint {
+    Endpoint::builder(presets::Empty)
+        .crypto_provider(provider)
         .alpns(vec![QS_ALPN.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()
@@ -467,4 +472,90 @@ async fn same_name_twice_is_refused_by_the_sender() {
     assert!(matches!(outcome.send, Err(SendError::DuplicateName(name)) if name == "x.txt"));
     assert!(outcome.receive.is_err());
     assert!(listing(out.path()).is_empty());
+}
+
+/// A provider like the real one, but without the post-quantum key exchange
+fn classical_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+    Arc::new(provider)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_uses_the_hybrid_key_exchange() {
+    let send_ep = endpoint().await;
+    let recv_ep = endpoint().await;
+    let addr = local_addr(&send_ep);
+
+    let accept = tokio::spawn(async move {
+        let incoming = send_ep.accept().await.unwrap();
+        let conn = incoming.accept().unwrap().await.unwrap();
+        let group = qs_core::crypto::key_exchange_group(&conn);
+        conn.closed().await;
+        group
+    });
+
+    let conn = recv_ep.connect(addr, QS_ALPN).await.unwrap();
+    assert_eq!(
+        qs_core::crypto::key_exchange_group(&conn),
+        Some(rustls::NamedGroup::X25519MLKEM768)
+    );
+    assert_eq!(qs_core::crypto::ensure_post_quantum(&conn), Ok(()));
+    conn.close(0u32.into(), b"done");
+
+    assert_eq!(
+        accept.await.unwrap(),
+        Some(rustls::NamedGroup::X25519MLKEM768)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn classical_receiver_is_refused() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    write(&src.path().join("file.bin"), &content(6, 1000));
+
+    let send_ep = endpoint().await;
+    let addr = local_addr(&send_ep);
+    let args = SenderArgs {
+        files: vec![src.path().join("file.bin")],
+        expected_peer: None,
+    };
+    let send = tokio::spawn(async move {
+        let mut sender = Sender::connect(send_ep, args).await?;
+        sender.close().await;
+        Ok::<_, SendError>(())
+    });
+
+    // A receiver that only offers X25519. It is not ours, so it does not check itself:
+    // the sender has to turn it away.
+    let classical = endpoint_with(classical_provider()).await;
+    let conn = classical.connect(addr.clone(), QS_ALPN).await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(20), conn.closed())
+        .await
+        .expect("the sender must close a classical connection");
+    assert!(closed.to_string().contains("post-quantum"), "{closed}");
+
+    // The sender kept waiting and takes a proper receiver. It hangs up right after
+    // connecting here, so there is nothing to receive.
+    assert!(!send.is_finished());
+    assert!(receive(endpoint().await, addr, out.path()).await.is_err());
+    send.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn classical_sender_is_refused() {
+    let out = tempfile::tempdir().unwrap();
+
+    let send_ep = endpoint_with(classical_provider()).await;
+    let addr = local_addr(&send_ep);
+    let accept = tokio::spawn(async move {
+        let incoming = send_ep.accept().await.unwrap();
+        let conn = incoming.accept().unwrap().await.unwrap();
+        conn.closed().await;
+    });
+
+    let result = receive(endpoint().await, addr, out.path()).await;
+    assert!(matches!(result, Err(ReceiveError::Crypto(_))), "{result:?}");
+    accept.await.unwrap();
 }

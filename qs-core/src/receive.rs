@@ -3,6 +3,7 @@ use crate::{
         connection_path, receive_packet, send_packet, ConnectionPath, FileSendRecvTree,
         FilesAvailable, FilesToSkip, PacketRecvError,
     },
+    crypto::{ensure_post_quantum, CryptoError},
     destination::{
         local_name, local_progress, part_path, resolve, validate_offer, Destination, NameError,
         Placement, ResumeState,
@@ -181,6 +182,8 @@ pub enum ReceiveError {
     FileName(#[from] NameError),
     #[error("{0}")]
     Limit(#[from] LimitError),
+    #[error("{0}")]
+    Crypto(#[from] CryptoError),
 }
 
 /// A receiver that can receive files
@@ -210,6 +213,12 @@ impl Receiver {
             .connect(addr, QS_ALPN)
             .await
             .map_err(|e| ReceiveError::Connect(e.to_string()))?;
+
+        if let Err(e) = ensure_post_quantum(&conn) {
+            conn.close(2u32.into(), b"post-quantum key exchange required");
+            this_endpoint.close().await;
+            return Err(e.into());
+        }
 
         tracing::info!("receiver connected to sender");
 

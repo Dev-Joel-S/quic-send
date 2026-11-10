@@ -152,7 +152,8 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: build the endpoint from the config file (`config`) and the flags: relay mode
     // (default, custom url, disabled) and the aws-lc-rs provider with the hybrid key exchange
     // from `qs_core::crypto`. Today the relay mode and the provider are fixed here.
-    let endpoint = Endpoint::builder(presets::Minimal)
+    let endpoint = Endpoint::builder(presets::Empty)
+        .crypto_provider(qs_core::crypto::provider())
         .secret_key(SecretKey::generate())
         .alpns(vec![QS_ALPN.to_vec()])
         .relay_mode(RelayMode::Default)
