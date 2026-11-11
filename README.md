@@ -163,6 +163,8 @@ laptop$  qsend send --to homelab <file/folder>
 
 A saved peer is recognized by its public key, no server takes part in that. For this, both machines use a key that stays the same, kept in `identity.key` in the config directory. Every other transfer uses a fresh key, so nothing links one transfer to the next. A key that stays can be recognized by the relay, which is the price of not needing a code.
 
+Only your user can read `identity.key`: mode 0600 on Linux, and on Windows an access list of its own with your account as the only entry, nothing inherited from the folder. That does not stop an administrator, a backup or somebody who reads the disk from another system. `qsend peers passphrase` seals the key with a passphrase as well (PBKDF2-HMAC-SHA256 with 600,000 rounds and ChaCha20-Poly1305, both from aws-lc-rs). You are then asked for it whenever a saved peer is used. An empty passphrase removes it again, and a forgotten one cannot be recovered: remove the file and save your peers again.
+
 The peer is dialed at the address it had when it was saved (its relay and its IP addresses). If it moved, pair once more with `--save-peer`. Without a relay, give the receiving machine a fixed `--port`.
 
 If a peer is saved after a transfer with a plain ticket and no password, the sender asks first and shows the receiver's fingerprint to compare, because anyone who had the ticket could be that receiver.

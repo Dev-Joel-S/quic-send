@@ -141,6 +141,8 @@ enum PeersAction {
         /// The name the peer was saved under
         name: String,
     },
+    #[clap(about = "Set, change or remove the passphrase of this device's identity")]
+    Passphrase,
 }
 
 /// An error to show to the user as it is, without a backtrace
@@ -261,6 +263,7 @@ async fn run(args: Args) -> Result<(), Failure> {
             match action {
                 None => peers::list(&state_dir()?, &settings),
                 Some(PeersAction::Remove { name }) => peers::remove(&state_dir()?, &name),
+                Some(PeersAction::Passphrase) => peers::passphrase(&state_dir()?),
             }
         }
     }

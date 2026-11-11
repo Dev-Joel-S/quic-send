@@ -9,6 +9,7 @@ pub mod packets;
 pub mod pairing;
 pub mod password;
 pub mod peers;
+pub mod private_file;
 pub mod receive;
 pub mod send;
 

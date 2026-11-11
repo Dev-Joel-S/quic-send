@@ -33,6 +33,17 @@ fs4 = "1.1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Access rights of the identity file, see src/private_file.rs
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = "3"

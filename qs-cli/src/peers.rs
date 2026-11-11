@@ -7,7 +7,10 @@
 use crate::config::{config_dir, RelaySetting, Settings};
 use colored::Colorize;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
-use qs_core::peers::{load_or_create_identity, KnownPeer, PeerError, PeerStore};
+use qs_core::peers::{
+    identity_state, load_or_create_identity, set_identity_passphrase, IdentityState, KnownPeer,
+    PeerError, PeerStore,
+};
 use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
@@ -25,9 +28,56 @@ pub fn state_dir(explicit_config: Option<&Path>) -> Result<PathBuf, Failure> {
     dir.ok_or_else(|| "there is no config directory on this system to keep peers in".into())
 }
 
-/// The stable identity of this device
+/// Wrong passphrases before giving up
+const PASSPHRASE_ATTEMPTS: usize = 3;
+
+/// The stable identity of this device. Asks for the passphrase if it is sealed with one.
 pub fn identity(dir: &Path) -> Result<SecretKey, Failure> {
-    Ok(load_or_create_identity(dir)?)
+    match identity_state(dir)? {
+        IdentityState::Plain => Ok(load_or_create_identity(dir, None)?),
+        IdentityState::Missing => {
+            let key = load_or_create_identity(dir, None)?;
+            eprintln!(
+                "{} this device now has an identity that stays, kept in {}. Only you can \
+                 read that file. `qsend peers passphrase` seals it with a passphrase as well.",
+                "note:".yellow().bold(),
+                dir.display()
+            );
+            Ok(key)
+        }
+        IdentityState::Sealed => {
+            for attempt in 1..=PASSPHRASE_ATTEMPTS {
+                let passphrase = crate::password::ask_passphrase()?;
+                match load_or_create_identity(dir, Some(&passphrase)) {
+                    Err(PeerError::WrongPassphrase) if attempt < PASSPHRASE_ATTEMPTS => {
+                        eprintln!("{} wrong passphrase, try again", "error:".red().bold());
+                    }
+                    result => return Ok(result?),
+                }
+            }
+            Err(PeerError::WrongPassphrase.into())
+        }
+    }
+}
+
+/// Set, change or remove the passphrase the identity is sealed with
+pub fn passphrase(dir: &Path) -> Result<(), Failure> {
+    // Whoever changes how the key is kept has to be able to use it, so this asks for the
+    // current passphrase first if there is one
+    let key = identity(dir)?;
+
+    let new = crate::password::ask_new_passphrase()?;
+    if new.is_empty() {
+        set_identity_passphrase(dir, &key, None)?;
+        println!("The identity is stored without a passphrase. Only you can read the file.");
+    } else {
+        set_identity_passphrase(dir, &key, Some(&new))?;
+        println!(
+            "The identity is sealed with the passphrase. You are asked for it whenever a \
+             saved peer is used. There is no way to recover it."
+        );
+    }
+    Ok(())
 }
 
 /// The peer known as `alias`: saved with `--save-peer`, or listed in the config file

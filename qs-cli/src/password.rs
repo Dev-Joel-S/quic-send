@@ -56,3 +56,25 @@ pub fn confirm_without() -> io::Result<bool> {
         .interact()
         .map_err(io::Error::other)
 }
+
+/// Ask for the passphrase the identity is sealed with
+pub fn ask_passphrase() -> io::Result<Zeroizing<String>> {
+    require_terminal()?;
+    dialoguer::Password::new()
+        .with_prompt("Passphrase for the identity of this device")
+        .interact()
+        .map(Zeroizing::new)
+        .map_err(io::Error::other)
+}
+
+/// Ask for a new passphrase for the identity, twice. Empty means none.
+pub fn ask_new_passphrase() -> io::Result<Zeroizing<String>> {
+    require_terminal()?;
+    dialoguer::Password::new()
+        .with_prompt("New passphrase (leave empty to store the identity without one)")
+        .with_confirmation("Repeat the passphrase", "The passphrases do not match")
+        .allow_empty_password(true)
+        .interact()
+        .map(Zeroizing::new)
+        .map_err(io::Error::other)
+}
