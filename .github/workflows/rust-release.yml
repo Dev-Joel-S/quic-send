@@ -11,15 +11,19 @@ env:
 # TODO: this workflow has never run. Start it once by hand (workflow_dispatch) and check
 #       that the MSVC build, `cargo deb` and the artifacts work before tagging a release.
 
+# Jobs may only read the repository, unless one asks for more itself
+permissions:
+  contents: read
+
 jobs:
   linux:
     name: Linux (static musl, .deb)
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: x86_64-unknown-linux-musl
 
@@ -27,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-          cargo install cargo-deb --locked
+          cargo install cargo-deb --locked --version 3.8.0
 
       - name: Build
         run: cargo build --release --locked -p qs-cli -p qs-rendezvous --target x86_64-unknown-linux-musl
@@ -42,7 +46,7 @@ jobs:
           tar czf "dist/qs-$version-x86_64-linux.tar.gz" "qs-$version-x86_64-linux"
           cargo deb -p qs-cli --target x86_64-unknown-linux-musl --no-build --output dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux
           path: dist/*
@@ -52,9 +56,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Build
         run: cargo build --release --locked -p qs-cli --target x86_64-pc-windows-msvc
@@ -67,7 +71,7 @@ jobs:
           cp target/x86_64-pc-windows-msvc/release/qs.exe "dist/qs-$version-x86_64-windows.exe"
           7z a "dist/qs-$version-x86_64-windows.zip" ./target/x86_64-pc-windows-msvc/release/qs.exe README.md LICENSE
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows
           path: dist/*
@@ -82,7 +86,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -94,6 +98,6 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload to the GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
