@@ -56,11 +56,11 @@ pub enum PeerError {
     DamagedIdentity(PathBuf),
     #[error("the file with the saved peers, {}, is damaged: {message}", path.display())]
     DamagedStore { path: PathBuf, message: String },
-    #[error("no peer is saved as {0:?}. `qs peers` lists the saved ones")]
+    #[error("no peer is saved as {0:?}. `qsend peers` lists the saved ones")]
     Unknown(String),
     #[error(
         "{alias:?} is already saved with another identity ({saved}), this one is {offered}. \
-         If that is intended, remove it first with `qs peers remove {alias}`"
+         If that is intended, remove it first with `qsend peers remove {alias}`"
     )]
     Changed {
         alias: String,

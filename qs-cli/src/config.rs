@@ -4,11 +4,11 @@
 //! `quic-send/config.toml`. Flags on the command line override it.
 //!
 //! ```toml
-//! # Rendezvous server for short codes. Without one, qs prints a ticket instead.
+//! # Rendezvous server for short codes. Without one, qsend prints a ticket instead.
 //! rendezvous_url = "https://rendezvous.example.com"
 //! # "default", "disabled" or the URL of your own relay
 //! relay = "default"
-//! # Where received files go. "." is the directory qs is started in.
+//! # Where received files go. "." is the directory qsend is started in.
 //! output_dir = "/home/me/Downloads"
 //! # Fixed UDP port instead of a random one
 //! port = 4433
@@ -24,10 +24,10 @@
 //!       the line and the problem, also for an unknown setting (typos are not ignored).
 //! DONE: precedence flag, then config file, then built-in default ([Settings::resolve]),
 //!       with tests.
-//! DONE: `qs config` prints the path of the file and the values in effect.
-//! DONE: the file is never written by qs, and no password or secret key belongs in it.
+//! DONE: `qsend config` prints the path of the file and the values in effect.
+//! DONE: the file is never written by qsend, and no password or secret key belongs in it.
 //! DONE: the relay mode and the Downloads lookup in `main.rs` use the values from here.
-//! DONE: `output_dir = "."` means the directory qs is started in, like `-o .` and `--here`.
+//! DONE: `output_dir = "."` means the directory qsend is started in, like `-o .` and `--here`.
 //! DONE: `known_peers` entries are used by `--to` and `--from`, next to the peers saved
 //!       with `--save-peer` (see `peers.rs`). They only carry an id, so sending to one needs
 //!       an own relay that both sides use.

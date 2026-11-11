@@ -35,13 +35,13 @@ Prebuilt downloads are on the [releases page](https://github.com/dev-joel-s/quic
 
 | Platform | Download |
 |----------|----------|
-| Any Linux (Debian, Arch, NixOS, ...) | `qs-<version>-x86_64-linux.tar.gz`, static binaries without dependencies: `qs` and the rendezvous server `qs-rendezvous` |
+| Any Linux (Debian, Arch, NixOS, ...) | `qsend-<version>-x86_64-linux.tar.gz`, static binaries without dependencies: `qsend` and the rendezvous server `qs-rendezvous` |
 | Debian, Ubuntu | `quic-send_<version>-1_amd64.deb`, install with `sudo apt install ./quic-send_*.deb` |
-| Windows | `qs-<version>-x86_64-windows.exe`, a standalone executable |
+| Windows | `qsend-<version>-x86_64-windows.exe`, a standalone executable |
 
 `SHA256SUMS` lists the checksums of all files.
 
-On Arch Linux, build the package with the [PKGBUILD](packaging/arch/PKGBUILD) (`makepkg -si` in that directory). Note that `quickshell` also installs a `qs` command.
+On Arch Linux, build the package with the [PKGBUILD](packaging/arch/PKGBUILD) (`makepkg -si` in that directory).
 
 From source, with a Rust toolchain:
 
@@ -56,27 +56,27 @@ cargo install --locked --git https://github.com/dev-joel-s/quic-send qs-cli
 Without a rendezvous server, the sender prints a ticket that carries its address and public key:
 
 ```
-$ qs send <file/folder>
+$ qsend send <file/folder>
 Ticket (copied to your clipboard):
 
 qs1:TYXpn-lm8ladLNDYvhrI_nKROlu2vy2HvxDI6Ync2pIBAQDAAAICme8C
 
 on the other peer, run the following command:
 
-qs receive <ticket>
+qsend receive <ticket>
 ```
 
 With a rendezvous server (see [below](#running-a-rendezvous-server)), it shows a short code instead:
 
 ```
-$ qs send --rendezvous https://rz.example.com <file/folder>
+$ qsend send --rendezvous https://rz.example.com <file/folder>
 Code (copied to your clipboard):
 
 K7X4-M2QP
 
 on the other peer, run the following command:
 
-qs receive K7X4-M2QP
+qsend receive K7X4-M2QP
 ```
 
 The receiver needs the same rendezvous server. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
@@ -85,12 +85,12 @@ Both sides print a short fingerprint of their own id and of the peer's (`This de
 
 ### Dragging files into the terminal
 
-Paths can be dragged into the terminal window, the shell pastes the quoted path and `qs` handles it.
+Paths can be dragged into the terminal window, the shell pastes the quoted path and `qsend` handles it.
 
-Or run `qs send` without any path and drag files and folders into the window one after another. Each one is listed with its size, an empty line starts the transfer:
+Or run `qsend send` without any path and drag files and folders into the window one after another. Each one is listed with its size, an empty line starts the transfer:
 
 ```
-$ qs send
+$ qsend send
 Drag files or folders into this window, or type their paths.
 Press Enter on an empty line to send them, Ctrl+C to cancel.
 
@@ -114,18 +114,18 @@ Files go to your Downloads folder, the path is printed before anything is receiv
 ### With an extra password
 
 ```
-$ qs send --password <file/folder>
-$ qs receive K7X4-M2QP
+$ qsend send --password <file/folder>
+$ qsend receive K7X4-M2QP
 ```
 
-The password is prompted for, never passed as an argument or read from a pipe. The receiver is asked for it on its own when the sender set one, `qs receive --password` asks right away.
+The password is prompted for, never passed as an argument or read from a pipe. The receiver is asked for it on its own when the sender set one, `qsend receive --password` asks right away.
 
 With a short code the password goes into the PAKE in addition to the code. With a ticket it is checked inside the connection, again with a PAKE, so it is never sent. The sender allows three wrong attempts.
 
 ### Without any server
 
 ```
-$ qs send --relay disabled --port 4433 <file/folder>
+$ qsend send --relay disabled --port 4433 <file/folder>
 Ticket:
 
 qs1:TYXpn-lm8ladLNDYvhrI_nKROlu2vy2HvxDI6Ync2pIBAQDAAAICme8C
@@ -134,32 +134,32 @@ or, typed by hand, one of:
 
 192.168.1.5:4433/4d85e99fe966f2569d2cd0d8be1ac8fe72913a5bb6bf2d87bf10c8e989dcda92
 
-$ qs receive --relay disabled 192.168.1.5:4433/4d85e99f...
+$ qsend receive --relay disabled 192.168.1.5:4433/4d85e99f...
 ```
 
 Nothing but the two machines is involved. The address always comes with the public key: an IP address alone could not be authenticated and is refused.
 
 Without a relay there is no hole punching, so the sender has to be reachable by the receiver: the same network, a forwarded UDP port, or a public IP address. `--port` gives the sender a fixed port to forward.
 
-`qs send --direct` prints a ticket even when a rendezvous server is configured.
+`qsend send --direct` prints a ticket even when a rendezvous server is configured.
 
 ### Saved peers
 
 Two machines that transfer often can save each other once and need no code afterwards:
 
 ```
-laptop$  qs send --save-peer homelab <file>
-homelab$ qs receive --save-peer laptop <code or ticket>
+laptop$  qsend send --save-peer homelab <file>
+homelab$ qsend receive --save-peer laptop <code or ticket>
 ```
 
 From then on:
 
 ```
-homelab$ qs receive --from laptop
-laptop$  qs send --to homelab <file/folder>
+homelab$ qsend receive --from laptop
+laptop$  qsend send --to homelab <file/folder>
 ```
 
-`qs peers` lists the saved peers, `qs peers remove <name>` forgets one.
+`qsend peers` lists the saved peers, `qsend peers remove <name>` forgets one.
 
 A saved peer is recognized by its public key, no server takes part in that. For this, both machines use a key that stays the same, kept in `identity.key` in the config directory. Every other transfer uses a fresh key, so nothing links one transfer to the next. A key that stays can be recognized by the relay, which is the price of not needing a code.
 
@@ -169,16 +169,16 @@ If a peer is saved after a transfer with a plain ticket and no password, the sen
 
 ### Config file
 
-`qs config` shows where the config file is and which settings are in effect. Flags on the command line override it.
+`qsend config` shows where the config file is and which settings are in effect. Flags on the command line override it.
 
 ```toml
 # ~/.config/quic-send/config.toml on Linux
 
-# Rendezvous server for short codes. Without one, qs prints a ticket instead.
+# Rendezvous server for short codes. Without one, qsend prints a ticket instead.
 rendezvous_url = "https://rz.example.com"
 # "default", "disabled" or the URL of your own relay
 relay = "default"
-# Where received files go. "." is the directory qs is started in.
+# Where received files go. "." is the directory qsend is started in.
 output_dir = "/home/me/Downloads"
 # Fixed UDP port instead of a random one
 port = 4433
@@ -214,13 +214,13 @@ $ qs-rendezvous --listen 127.0.0.1:8080 --behind-proxy
 
 Only use `--behind-proxy` behind a proxy that sets `X-Forwarded-For` itself, otherwise clients can pick their own address. With nginx that is `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. An example systemd unit is in [packaging/qs-rendezvous.service](packaging/qs-rendezvous.service).
 
-Plain `http://` works too, for a server on your own network. The messages stay sealed, but the pairing can be watched and disturbed on the way, and `qs` says so.
+Plain `http://` works too, for a server on your own network. The messages stay sealed, but the pairing can be watched and disturbed on the way, and `qsend` says so.
 
 A code is valid for five minutes (`--ttl`) and good for one attempt. That one attempt is what makes a six character secret enough, and it also means that anyone who can reach the server can use up codes by claiming their slots without knowing them. They learn nothing, but the pairing fails. On a server that is open to the internet, expect that this can happen.
 
 ### Your own relay
 
-The relay helps two peers behind NAT find a direct path, and carries the encrypted traffic if there is none. `relay = "https://relay.example.com"` points `qs` at your own, which is iroh's relay server, see the [iroh documentation](https://github.com/n0-computer/iroh). `relay = "disabled"` uses none.
+The relay helps two peers behind NAT find a direct path, and carries the encrypted traffic if there is none. `relay = "https://relay.example.com"` points `qsend` at your own, which is iroh's relay server, see the [iroh documentation](https://github.com/n0-computer/iroh). `relay = "disabled"` uses none.
 
 ## Comparison with other file transfer tools
 

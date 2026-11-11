@@ -76,7 +76,7 @@ enum Mode {
         password: bool,
 
         /// Send to a saved peer, without code or ticket. It has to be waiting with
-        /// `qs receive --from <you>`
+        /// `qsend receive --from <you>`
         #[clap(long, value_name = "NAME", conflicts_with = "direct")]
         to: Option<String>,
 
@@ -186,7 +186,7 @@ async fn main() -> ExitCode {
         .with(tracing_subscriber::fmt::layer())
         .with(
             Targets::new()
-                .with_target("qs", level)
+                .with_target("qsend", level)
                 .with_target("qs_core", level)
                 .with_default(dependencies),
         )
@@ -198,7 +198,7 @@ async fn main() -> ExitCode {
         let _ = colored::control::set_virtual_terminal(true);
     }
 
-    tracing::debug!("qs {}", QS_PROTO_VERSION);
+    tracing::debug!("qsend {}", QS_PROTO_VERSION);
     watch_ctrl_c();
 
     match run(args).await {
@@ -390,7 +390,7 @@ async fn send(
             .map_err(|e| {
                 format!(
                     "could not send to {alias}: {e}\n\
-                     It has to be waiting with `qs receive --from <name of this device>`, \
+                     It has to be waiting with `qsend receive --from <name of this device>`, \
                      and both sides have to have saved each other."
                 )
             })?;
@@ -422,7 +422,7 @@ async fn send(
                 .flatten();
             print_secret("Code", &code, clipboard.is_some());
             println!("on the other peer, run the following command:\n");
-            println!("{}\n", format!("qs receive {code}").yellow());
+            println!("{}\n", format!("qsend receive {code}").yellow());
             println!(
                 "{}",
                 format!(
@@ -467,7 +467,7 @@ async fn send(
             }
 
             println!("on the other peer, run the following command:\n");
-            println!("{}\n", "qs receive <ticket>".yellow());
+            println!("{}\n", "qsend receive <ticket>".yellow());
             if password.is_some() {
                 println!("{}", "It will be asked for the password.".dimmed());
             }
@@ -773,7 +773,7 @@ fn output_dir(output: Option<PathBuf>) -> PathBuf {
 }
 
 /// The output directory, created if missing and as an absolute path.
-/// A relative path, like `.`, is relative to the directory qs was started in.
+/// A relative path, like `.`, is relative to the directory qsend was started in.
 fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
     let output = output_dir(output);
     std::fs::create_dir_all(&output)?;

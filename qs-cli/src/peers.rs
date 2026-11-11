@@ -2,7 +2,7 @@
 //!
 //! The logic is in `qs_core::peers`. Peers saved with `--save-peer` are kept in
 //! `known_peers.json` next to the config file. Entries of `[known_peers]` in the config
-//! file are read as well, they only have an id and are never written by qs.
+//! file are read as well, they only have an id and are never written by qsend.
 
 use crate::config::{config_dir, RelaySetting, Settings};
 use colored::Colorize;
@@ -123,8 +123,8 @@ pub fn remember(
     println!(
         "Saved this peer as {}. Next time no code is needed: {} or {}",
         alias.bright_white(),
-        format!("qs send --to {alias}").yellow(),
-        format!("qs receive --from {alias}").yellow()
+        format!("qsend send --to {alias}").yellow(),
+        format!("qsend receive --from {alias}").yellow()
     );
     Ok(())
 }

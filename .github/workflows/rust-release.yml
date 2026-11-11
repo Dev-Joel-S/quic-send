@@ -40,10 +40,10 @@ jobs:
         shell: bash
         run: |
           version=$(cargo pkgid -p qs-cli | sed 's/.*[#@]//')
-          mkdir -p dist "qs-$version-x86_64-linux"
-          cp target/x86_64-unknown-linux-musl/release/{qs,qs-rendezvous} README.md LICENSE "qs-$version-x86_64-linux/"
-          cp packaging/qs-rendezvous.service "qs-$version-x86_64-linux/"
-          tar czf "dist/qs-$version-x86_64-linux.tar.gz" "qs-$version-x86_64-linux"
+          mkdir -p dist "qsend-$version-x86_64-linux"
+          cp target/x86_64-unknown-linux-musl/release/{qsend,qs-rendezvous} README.md LICENSE "qsend-$version-x86_64-linux/"
+          cp packaging/qs-rendezvous.service "qsend-$version-x86_64-linux/"
+          tar czf "dist/qsend-$version-x86_64-linux.tar.gz" "qsend-$version-x86_64-linux"
           cargo deb -p qs-cli --target x86_64-unknown-linux-musl --no-build --output dist/
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -68,8 +68,8 @@ jobs:
         run: |
           version=$(cargo pkgid -p qs-cli | sed 's/.*[#@]//')
           mkdir -p dist
-          cp target/x86_64-pc-windows-msvc/release/qs.exe "dist/qs-$version-x86_64-windows.exe"
-          7z a "dist/qs-$version-x86_64-windows.zip" ./target/x86_64-pc-windows-msvc/release/qs.exe README.md LICENSE
+          cp target/x86_64-pc-windows-msvc/release/qsend.exe "dist/qsend-$version-x86_64-windows.exe"
+          7z a "dist/qsend-$version-x86_64-windows.zip" ./target/x86_64-pc-windows-msvc/release/qsend.exe README.md LICENSE
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

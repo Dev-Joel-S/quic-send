@@ -9,7 +9,7 @@
 //! DONE: an encoded ticket starts with `qs1:`. An unknown version is reported as such
 //!       ([TicketError::UnknownVersion]) instead of as garbage.
 //! DONE: this mode works with nothing but an IP address: no rendezvous, no relay, no hole
-//!       punching (`qs send --relay disabled`, covered by the end to end tests, which run
+//!       punching (`qsend send --relay disabled`, covered by the end to end tests, which run
 //!       without a relay). An IP without the key is not accepted, it could not be
 //!       authenticated.
 //! DONE: a form that can be typed, `192.168.1.5:4433/<key>` ([Ticket::typable] to print,

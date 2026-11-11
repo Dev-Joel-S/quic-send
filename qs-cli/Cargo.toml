@@ -34,7 +34,7 @@ tempfile = "3"
 
 [[bin]]
 path = "src/main.rs"
-name = "qs"
+name = "qsend"
 
 [package.metadata.deb]
 name = "quic-send"
@@ -49,6 +49,6 @@ priority = "optional"
 # The release binary is statically linked against musl
 depends = ""
 assets = [
-    ["target/release/qs", "usr/bin/", "755"],
+    ["target/release/qsend", "usr/bin/", "755"],
     ["../README.md", "usr/share/doc/quic-send/README.md", "644"],
 ]

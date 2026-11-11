@@ -28,5 +28,5 @@ name = "qs-rendezvous"
 
 # DONE: dependencies, the `qs-rendezvous` binary and the shared message types
 #       (`qs-rendezvous-api`).
-# DONE: the release workflow builds the static Linux binary and puts it next to `qs`.
+# DONE: the release workflow builds the static Linux binary and puts it next to `qsend`.
 # TODO: a .deb with the systemd unit from `packaging/qs-rendezvous.service`.

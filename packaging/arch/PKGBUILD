@@ -12,8 +12,6 @@ url="https://github.com/dev-joel-s/quic-send"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
-# quickshell also installs /usr/bin/qs
-conflicts=('quickshell')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # TODO: replace SKIP with the real checksum (`updpkgsums`) once a v0.5.0 tag exists,
 #       then build once with `makepkg` in a clean chroot.
@@ -40,7 +38,7 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 target/release/qs "$pkgdir/usr/bin/qs"
+  install -Dm755 target/release/qsend "$pkgdir/usr/bin/qsend"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }
