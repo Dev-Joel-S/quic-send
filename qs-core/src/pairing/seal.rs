@@ -210,7 +210,7 @@ fn confirmation_key(key: &SharedKey) -> hmac::Key {
 }
 
 fn confirmation_message(exporter: &[u8], side: Side) -> Vec<u8> {
-    [CONFIRMATION, b"/", side.label(), b"/", exporter].concat()
+    [CONFIRMATION, b"/", side.label().as_bytes(), b"/", exporter].concat()
 }
 
 /// Proof by `side` that it holds `key`, valid only on the connection that `exporter`
@@ -242,9 +242,9 @@ mod tests {
 
     /// The shared key of a finished exchange, as both sides have it
     fn shared(password: &[u8]) -> (SharedKey, SharedKey) {
-        let (a, message_a) = Pake::start(Side::Sender, b"test", password);
-        let (b, message_b) = Pake::start(Side::Receiver, b"test", password);
-        (a.finish(&message_b).unwrap(), b.finish(&message_a).unwrap())
+        let (a, message_a) = Pake::start(b"test", password).unwrap();
+        let (key_b, message_b) = Pake::respond(b"test", password, &message_a).unwrap();
+        (a.finish(&message_b).unwrap(), key_b)
     }
 
     /// The KEM secret as both sides have it

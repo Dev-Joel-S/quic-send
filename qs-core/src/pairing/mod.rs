@@ -31,7 +31,7 @@ pub mod seal;
 
 use code::{Code, CodeError};
 use iroh::{EndpointAddr, EndpointId};
-use pake::{password_input, Pake, Side};
+use pake::{password_input, Pake};
 use qs_rendezvous_api::ErrorCode;
 use rendezvous::{Client, ClientError};
 use seal::{encapsulate, transcript, Direction, KemKey, SealError, SessionKeys};
@@ -196,7 +196,7 @@ fn sender_hello(
     password: Option<&str>,
 ) -> Result<(Pake, KemKey, Vec<u8>), SealError> {
     let (pake, pake_message) =
-        Pake::start(Side::Sender, CONTEXT, &password_input(secret, password));
+        Pake::start(CONTEXT, &password_input(secret, password)).map_err(|_| SealError::Crypto)?;
     let (kem, kem_key) = KemKey::generate()?;
 
     let hello = encode(&Hello {
@@ -226,16 +226,14 @@ fn receiver_reply(
         _ => {}
     }
 
-    let (pake, pake_message) = Pake::start(
-        Side::Receiver,
-        CONTEXT,
-        &password_input(code.secret(), password),
-    );
     // A first message that is not a valid PAKE message or KEM key did not come from
     // an honest sender. Nothing was revealed, the attempt is simply over.
-    let pake_key = pake
-        .finish(&hello.pake)
-        .map_err(|_| PairingError::WrongCode)?;
+    let (pake_key, pake_message) = Pake::respond(
+        CONTEXT,
+        &password_input(code.secret(), password),
+        &hello.pake,
+    )
+    .map_err(|_| PairingError::WrongCode)?;
     let (kem_ciphertext, kem_secret) =
         encapsulate(&hello.kem_key).map_err(|_| PairingError::WrongCode)?;
 

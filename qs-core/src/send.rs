@@ -360,7 +360,7 @@ async fn greet(
         return Ok((Greeting::Welcome, identity));
     };
 
-    let (pake, message) = password::start(Side::Sender, password);
+    let (pake, message) = password::start(password).map_err(|_| PasswordError::Unavailable)?;
     send_packet(SenderToReceiver::Password { message }, conn).await?;
 
     let (message, proof) = match receive_packet::<ReceiverToSender>(conn).await? {

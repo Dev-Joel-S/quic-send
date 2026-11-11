@@ -19,7 +19,7 @@ iroh = { workspace = true }
 noq = { workspace = true }
 rustls = { workspace = true }
 aws-lc-rs = { workspace = true }
-spake2 = { workspace = true }
+pake-cpace = { workspace = true }
 zeroize = { workspace = true }
 unicode-normalization = { workspace = true }
 reqwest = { workspace = true }

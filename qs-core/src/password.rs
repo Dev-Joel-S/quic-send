@@ -16,7 +16,7 @@
 //!       missing password, password where none was set.
 
 use crate::pairing::{
-    pake::{normalize_password, Pake, SharedKey, Side},
+    pake::{normalize_password, Pake, PakeError, SharedKey, Side},
     seal::{confirmation, verify_confirmation},
 };
 use thiserror::Error;
@@ -40,11 +40,26 @@ pub enum PasswordError {
     ExpectedByReceiver,
     #[error("wrong password entered {MAX_ATTEMPTS} times, giving up")]
     TooManyAttempts,
+    #[error("the password check could not be started, the system gave no random numbers")]
+    Unavailable,
 }
 
-/// Start the exchange for `side`. Returns the state and the message for the other side.
-pub(crate) fn start(side: Side, password: &str) -> (Pake, Vec<u8>) {
-    Pake::start(side, CONTEXT, normalize_password(password).as_bytes())
+/// Start the exchange as the sender. Returns the state and the message for the receiver.
+pub(crate) fn start(password: &str) -> Result<(Pake, Vec<u8>), PakeError> {
+    Pake::start(CONTEXT, normalize_password(password).as_bytes())
+}
+
+/// Answer the sender's message as the receiver. Returns the key and the message for the
+/// sender.
+pub(crate) fn respond(
+    password: &str,
+    sender_message: &[u8],
+) -> Result<(SharedKey, Vec<u8>), PakeError> {
+    Pake::respond(
+        CONTEXT,
+        normalize_password(password).as_bytes(),
+        sender_message,
+    )
 }
 
 /// Keying material only the two ends of `conn` can compute

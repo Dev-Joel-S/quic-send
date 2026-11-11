@@ -10,7 +10,7 @@ This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomat
 ## What this fork changes
 
 - **Short codes instead of long tickets**: with a rendezvous server, the sender shows an 8-character [Crockford Base32](https://www.crockford.com/base32.html) code like `K7X4-M2QP`, short enough to read out over the phone. Without one, it prints a ticket as upstream does.
-- **Zero trust by design**: the code is not just a lookup index. Its first two characters name a slot on the rendezvous server, the other six are the secret of a [SPAKE2](https://www.rfc-editor.org/rfc/rfc9382) PAKE. The server only ever stores opaque blobs and can neither read the peer address nor substitute its own. A hostile rendezvous server can deny service, nothing else.
+- **Zero trust by design**: the code is not just a lookup index. Its first two characters name a slot on the rendezvous server, the other six are the secret of a [CPace](https://datatracker.ietf.org/doc/draft-irtf-cfrg-cpace/) PAKE. The server only ever stores opaque blobs and can neither read the peer address nor substitute its own. A hostile rendezvous server can deny service, nothing else.
 - **Post-quantum key exchange**: the QUIC handshake uses hybrid X25519MLKEM768 and both sides refuse a connection that fell back to a classical exchange, so a recorded transfer stays confidential against a future quantum adversary. The pairing mixes a PAKE secret and an ML-KEM-768 secret into its keys, an attacker has to break both.
 - **Optional password**: an extra password can be required on top of the code or ticket. Unlike Magic Wormhole, it is optional, not mandatory.
 - **Serverless mode**: no rendezvous and no relay at all. Peers exchange address and public key directly, like [transmitic](https://github.com/transmitic/transmitic). Useful for server-to-server transfers and for anyone who does not want to run infrastructure.
@@ -250,7 +250,8 @@ The code, or the ticket, is the secret. Anyone who sees it in time can take the 
 
 What you should know before relying on it:
 
-- The PAKE is the RustCrypto [`spake2`](https://crates.io/crates/spake2) crate, which has not had an independent audit. Everything else cryptographic comes from [aws-lc-rs](https://github.com/aws/aws-lc-rs) and rustls. CPace was planned, but no maintained implementation exists.
+- The PAKE is CPace on ristretto255 from the [`pake-cpace`](https://crates.io/crates/pake-cpace) crate, which has not had an independent audit and is an early variant of CPace, not byte for byte the CFRG draft. Everything else cryptographic comes from [aws-lc-rs](https://github.com/aws/aws-lc-rs) and rustls.
+- CPace is not a post-quantum PAKE, no audited one exists. What a pairing has against a quantum computer: the key that seals the peer address also depends on ML-KEM-768, so a recorded pairing stays sealed, and CPace has no fixed constants whose one-time break would open every code, each single guess of a code costs an attacker a discrete logarithm of its own.
 - Codes and tickets are copied to the clipboard. A clipboard history or a synced clipboard can show them to others before they are used. `--no-clipboard`, or `clipboard = false` in the config file, switches that off.
 - The code of this fork has not been audited by anyone outside either.
 

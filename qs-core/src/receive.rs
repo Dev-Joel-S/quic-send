@@ -420,11 +420,9 @@ impl Receiver {
             p => return Err(ReceiveError::UnexpectedDataPacket(p)),
         };
 
-        let (pake, message) = password::start(Side::Receiver, password);
         // A sender that sends no valid message does not know the password either
-        let key = pake
-            .finish(&sender_message)
-            .map_err(|_| PasswordError::Wrong)?;
+        let (key, message) =
+            password::respond(password, &sender_message).map_err(|_| PasswordError::Wrong)?;
         let proof =
             password::proof(&self.conn, &key, Side::Receiver).ok_or(PasswordError::Wrong)?;
         send_packet(ReceiverToSender::Password { message, proof }, &self.conn).await?;
