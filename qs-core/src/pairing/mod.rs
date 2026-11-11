@@ -23,6 +23,9 @@
 //!       two pinned ids does the rest, with its own post-quantum key exchange.
 //! DONE: the receiver learns from the first message whether the sender set a password
 //!       ([Claim::password_required]), so it can ask for one before the code is spent.
+//! DONE: looking at a slot ([Claim::new]) spends nothing. The code is spent by the reply
+//!       ([Claim::complete]), which is the one guess its sender checks. A receiver that
+//!       gives up before that leaves the sender's code usable.
 
 pub mod code;
 pub mod pake;
@@ -88,6 +91,8 @@ pub enum PairingError {
     Protocol { url: String, message: String },
     #[error("the rendezvous server is busy, try again in a moment")]
     Busy,
+    #[error("none of the rendezvous servers can be used:\n{0}")]
+    NoServer(String),
     #[error("{0:?} is not a valid rendezvous url, it has to start with http:// or https://")]
     InvalidUrl(String),
     #[error("the sender protected this transfer with a password, but none was given")]
@@ -141,6 +146,32 @@ impl PairingError {
             },
         }
     }
+}
+
+/// One error for a list of servers that all failed
+fn unavailable(mut errors: Vec<PairingError>) -> PairingError {
+    if errors.len() == 1 {
+        return errors.remove(0);
+    }
+    let lines: Vec<String> = errors.iter().map(|e| format!("- {e}")).collect();
+    PairingError::NoServer(lines.join("\n"))
+}
+
+/// The first of `servers` that answers as a rendezvous server of this version.
+///
+/// A sender uses this to pick the server for its code. `servers` is the list from the
+/// configuration, in order of preference.
+pub async fn first_available(servers: &[Client]) -> Result<&Client, PairingError> {
+    let mut errors = Vec::new();
+
+    for server in servers {
+        match server.check().await {
+            Ok(()) => return Ok(server),
+            Err(e) => errors.push(PairingError::from_client(e, server.url())),
+        }
+    }
+
+    Err(unavailable(errors))
 }
 
 /// First message, from the sender. Not secret, but covered by the transcript.
@@ -408,40 +439,58 @@ impl Offer {
     }
 }
 
-/// The receiver's side of a pairing: a slot that was claimed with a code
+/// The receiver's side of a pairing: the slot of a code, looked at but not used yet
 pub struct Claim {
     client: Client,
     code: Code,
-    token: String,
     hello: Vec<u8>,
     password_required: bool,
 }
 
 impl Claim {
-    /// Claim the slot of `code`. This spends the code: a slot can be claimed once.
+    /// Fetch the first message from the slot of `code`. This does not spend the code,
+    /// [Claim::complete] does.
     pub async fn new(client: &Client, code: Code) -> Result<Self, PairingError> {
-        let claimed = client
-            .claim(code.nameplate())
+        let hello = client
+            .look(code.nameplate())
             .await
             .map_err(|e| PairingError::at(Stage::Claiming, e, client.url()))?;
 
-        let claim = Self {
-            client: client.clone(),
-            code,
-            token: claimed.token,
-            hello: claimed.message,
-            password_required: false,
-        };
-
-        match postcard::from_bytes::<Hello>(&claim.hello) {
-            Ok(hello) if hello.version == VERSION => Ok(Self {
-                password_required: hello.password,
-                ..claim
+        match postcard::from_bytes::<Hello>(&hello) {
+            Ok(decoded) if decoded.version == VERSION => Ok(Self {
+                client: client.clone(),
+                code,
+                password_required: decoded.password,
+                hello,
             }),
-            _ => {
-                claim.handle().cancel().await;
-                Err(PairingError::Version)
+            _ => Err(PairingError::Version),
+        }
+    }
+
+    /// Look for the slot of `code` on `servers`, in order.
+    ///
+    /// The sender put it on the first server of its list that answered. With the same
+    /// list that is the first one here too, the others are only asked if a server does
+    /// not answer or does not know the code. Looking spends nothing on any of them.
+    pub async fn find(servers: &[Client], code: Code) -> Result<Self, PairingError> {
+        let mut errors = Vec::new();
+        let mut unknown = false;
+
+        for server in servers {
+            if let Err(e) = server.check().await {
+                errors.push(PairingError::from_client(e, server.url()));
+                continue;
             }
+            match Self::new(server, code.clone()).await {
+                Err(PairingError::Unknown) => unknown = true,
+                result => return result,
+            }
+        }
+
+        if unknown {
+            Err(PairingError::Unknown)
+        } else {
+            Err(unavailable(errors))
         }
     }
 
@@ -450,17 +499,10 @@ impl Claim {
         self.password_required
     }
 
-    /// A handle to give up the slot from elsewhere
-    pub fn handle(&self) -> SlotHandle {
-        SlotHandle {
-            client: self.client.clone(),
-            nameplate: self.code.nameplate().to_string(),
-            token: self.token.clone(),
-        }
-    }
-
     /// Finish the pairing: prove knowledge of the code, tell the sender `own_id` and get
     /// its address. Only the endpoint with `own_id` will be let in by the sender.
+    ///
+    /// This spends the code, whether it was the right one or not.
     pub async fn complete(
         self,
         password: Option<&str>,
@@ -468,28 +510,25 @@ impl Claim {
     ) -> Result<EndpointAddr, PairingError> {
         let nameplate = self.code.nameplate();
         let url = self.client.url();
-        let at = |e| PairingError::at(Stage::WaitingForSender, e, url);
 
-        let (keys, reply) = match receiver_reply(&self.code, password, &self.hello, own_id) {
-            Ok(result) => result,
-            Err(e) => {
-                self.client.delete(nameplate, &self.token).await;
-                return Err(e);
-            }
-        };
+        // Nothing was sent yet, so an error here leaves the slot as it was
+        let (keys, reply) = receiver_reply(&self.code, password, &self.hello, own_id)?;
 
-        self.client
-            .put_reply(nameplate, &self.token, &reply)
+        let token = self
+            .client
+            .put_reply(nameplate, &reply)
             .await
-            .map_err(at)?;
+            .map_err(|e| PairingError::at(Stage::Claiming, e, url))?
+            .token;
+        let at = |e| PairingError::at(Stage::WaitingForSender, e, url);
 
         let deadline = Instant::now() + RECEIVER_PATIENCE;
         let sealed = loop {
-            match self.client.poll_address(nameplate, &self.token).await {
+            match self.client.poll_address(nameplate, &token).await {
                 Ok(Some(sealed)) => break sealed,
                 Ok(None) if Instant::now() < deadline => continue,
                 Ok(None) => {
-                    self.client.delete(nameplate, &self.token).await;
+                    self.client.delete(nameplate, &token).await;
                     return Err(PairingError::SenderGone);
                 }
                 Err(e) => return Err(at(e)),

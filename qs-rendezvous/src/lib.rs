@@ -9,23 +9,29 @@
 //!       senders never collide.
 //! DONE: messages are stored per slot and never interpreted: first message of the sender,
 //!       reply of the receiver, sealed address of the sender.
-//! DONE: a slot can be claimed exactly once, a second attempt gets `slot_used`
-//!       (test `second_claim_is_refused`). This is the defense against online guessing.
+//! DONE: a slot takes exactly one reply, a second one gets `slot_used` (test
+//!       `second_reply_is_refused`). The reply is the guess at the code, so this is the
+//!       defense against online guessing.
+//! DONE: looking at a slot (`GET /v1/slots/{nameplate}`) is free: it changes nothing and
+//!       does not count as an attempt, so nobody can use up codes by walking through the
+//!       1024 nameplates (test `looking_at_a_slot_does_not_use_it`). The first message
+//!       it returns is a PAKE message and a public key, which give away nothing.
 //! DONE: a slot is removed when the address was fetched, on a delete request and when it
 //!       expires. Ended slots are remembered for a while, so clients can be told `expired`,
 //!       `used` and `closed` apart from a nameplate that never existed.
 //! DONE: limits: message size, slots in total (the nameplate space) and per address,
-//!       slot creations and claims per address and minute. Everything is in memory.
+//!       slot creations, replies and looks per address and minute. Everything is in
+//!       memory.
 //! DONE: `GET` requests wait up to 25 seconds for a message (long polling).
 //! DONE: nothing is logged per slot, so slot names never end up next to IP addresses.
 //! DONE: tests in `tests/server.rs`, including clients that behave badly.
 //! DONE: TLS is the job of a reverse proxy, the README has an example configuration and
 //!       `packaging/qs-rendezvous.service` an example systemd unit.
 //! DONE: tokens are compared in constant time ([same_token]).
-//! TODO (decision, audit finding M3): anyone who can reach the server can use up codes by
-//!       claiming their slots. That follows from one claim per slot, which is what limits
-//!       guessing, and from only 1024 nameplates. Options: a 3 + 5 split of the code,
-//!       stricter limits per address, or a server that only known users can reach.
+//! DONE (audit finding M3): the code stays 2 + 6 characters. What is left of the finding:
+//!       anyone who can reach the server can still spend a code by sending a reply to its
+//!       slot, because the sender closes the slot after one wrong reply. That one guess per
+//!       code is the point of the design. The limit of replies per address slows it down.
 
 use axum::{
     extract::{rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Path, Query, State},
@@ -35,7 +41,7 @@ use axum::{
     Json, Router,
 };
 use qs_rendezvous_api::{
-    is_nameplate, ErrorBody, ErrorCode, Message, ServerInfo, SlotClaimed, SlotCreated, ALPHABET,
+    is_nameplate, ErrorBody, ErrorCode, Message, ServerInfo, SlotCreated, SlotReplied, ALPHABET,
     API_VERSION, MAX_MESSAGE_BYTES, MAX_WAIT_SECS, NAMEPLATE_LEN, SERVICE_NAME,
 };
 use serde::Deserialize;
@@ -51,18 +57,21 @@ use tokio::sync::Notify;
 /// How the server behaves
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// How long a slot lives while nobody has claimed it
+    /// How long a slot lives while nobody has replied to it
     pub ttl: Duration,
-    /// How long the two peers have to finish once the slot is claimed
-    pub claimed_ttl: Duration,
+    /// How long the two peers have to finish once the reply is there
+    pub reply_ttl: Duration,
     /// How long an ended slot is remembered, to tell why it is gone
     pub remember: Duration,
     /// Take the client address from `X-Forwarded-For` instead of the connection
     pub behind_proxy: bool,
     /// Slots one address may create per minute
     pub creates_per_minute: u32,
-    /// Claims one address may make per minute
-    pub claims_per_minute: u32,
+    /// Replies one address may send per minute. A reply is a guess at a code.
+    pub replies_per_minute: u32,
+    /// Looks at a slot one address may take per minute. They are free for the slot,
+    /// the limit only keeps the load down.
+    pub looks_per_minute: u32,
     /// Slots one address may have open at once
     pub slots_per_address: usize,
 }
@@ -71,11 +80,12 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             ttl: Duration::from_secs(300),
-            claimed_ttl: Duration::from_secs(120),
+            reply_ttl: Duration::from_secs(120),
             remember: Duration::from_secs(600),
             behind_proxy: false,
             creates_per_minute: 30,
-            claims_per_minute: 30,
+            replies_per_minute: 30,
+            looks_per_minute: 120,
             slots_per_address: 16,
         }
     }
@@ -106,7 +116,7 @@ struct Slot {
     sender_token: String,
     /// First message of the sender
     hello: Vec<u8>,
-    /// Set once the slot is claimed
+    /// Set once the reply is there
     receiver_token: Option<String>,
     /// Reply of the receiver
     reply: Option<Vec<u8>>,
@@ -127,7 +137,8 @@ enum Gone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Limited {
     Create,
-    Claim,
+    Reply,
+    Look,
 }
 
 #[derive(Default)]
@@ -368,42 +379,31 @@ async fn create_slot(
     ))
 }
 
-async fn claim_slot(
+/// The first message of a slot. Free: it changes nothing and can be asked for again.
+async fn get_slot(
     State(shared): State<Arc<Shared>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(nameplate): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<SlotClaimed>, ApiError> {
+) -> Result<Json<Message>, ApiError> {
     let address = client_address(&shared, peer, &headers);
-    let config = &shared.config;
 
     let mut inner = shared.lock();
-    inner.allow(address, Limited::Claim, config.claims_per_minute)?;
+    inner.allow(address, Limited::Look, shared.config.looks_per_minute)?;
 
     if !is_nameplate(&nameplate) {
         return Err(ApiError(ErrorCode::UnknownSlot));
     }
-    let Some(slot) = inner.slots.get_mut(&nameplate) else {
+    let Some(slot) = inner.slots.get(&nameplate) else {
         return Err(inner.missing(&nameplate));
     };
-
-    // One claim per slot. This is what limits guessing the code to one attempt.
-    if slot.receiver_token.is_some() {
+    // Somebody else already answered, the code is spent
+    if slot.reply.is_some() {
         return Err(ApiError(ErrorCode::SlotUsed));
     }
 
-    let token = new_token()?;
-    slot.receiver_token = Some(token.clone());
-    slot.expires = slot.expires.max(Instant::now() + config.claimed_ttl);
-    slot.changed.notify_waiters();
-
-    Ok(Json(SlotClaimed {
+    Ok(Json(Message {
         message: slot.hello.clone(),
-        token,
-        expires_in: slot
-            .expires
-            .saturating_duration_since(Instant::now())
-            .as_secs(),
     }))
 }
 
@@ -442,27 +442,43 @@ fn party(slot: &Slot, token: &str) -> Result<Party, ApiError> {
 
 async fn put_reply(
     State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(nameplate): Path<String>,
     headers: HeaderMap,
     body: Result<Json<Message>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<SlotReplied>, ApiError> {
     let reply = message(body)?;
-    let token = bearer(&headers)?;
+    let address = client_address(&shared, peer, &headers);
+    let config = &shared.config;
 
     let mut inner = shared.lock();
+    inner.allow(address, Limited::Reply, config.replies_per_minute)?;
+
+    if !is_nameplate(&nameplate) {
+        return Err(ApiError(ErrorCode::UnknownSlot));
+    }
     let Some(slot) = inner.slots.get_mut(&nameplate) else {
         return Err(inner.missing(&nameplate));
     };
-    if party(slot, token)? != Party::Receiver {
-        return Err(ApiError(ErrorCode::Forbidden));
-    }
+
+    // One reply per slot. This is what limits guessing the code to one attempt.
     if slot.reply.is_some() {
-        return Err(ApiError(ErrorCode::BadRequest));
+        return Err(ApiError(ErrorCode::SlotUsed));
     }
 
+    let token = new_token()?;
+    slot.receiver_token = Some(token.clone());
     slot.reply = Some(reply);
+    slot.expires = slot.expires.max(Instant::now() + config.reply_ttl);
     slot.changed.notify_waiters();
-    Ok(StatusCode::NO_CONTENT)
+
+    Ok(Json(SlotReplied {
+        token,
+        expires_in: slot
+            .expires
+            .saturating_duration_since(Instant::now())
+            .as_secs(),
+    }))
 }
 
 async fn put_address(
@@ -594,8 +610,7 @@ fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/v1", get(info))
         .route("/v1/slots", post(create_slot))
-        .route("/v1/slots/{nameplate}", axum::routing::delete(delete_slot))
-        .route("/v1/slots/{nameplate}/claim", post(claim_slot))
+        .route("/v1/slots/{nameplate}", get(get_slot).delete(delete_slot))
         .route("/v1/slots/{nameplate}/reply", get(get_reply).put(put_reply))
         .route(
             "/v1/slots/{nameplate}/address",

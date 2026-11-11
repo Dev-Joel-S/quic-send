@@ -326,23 +326,23 @@ impl PeerOptions {
     }
 }
 
-/// The client for the rendezvous server in `settings`, if one is set
-fn rendezvous(settings: &Settings, endpoint: &Endpoint) -> Result<Option<Client>, PairingError> {
-    let client = settings
-        .rendezvous_url
-        .as_deref()
+/// Clients for the rendezvous servers in `settings`, in order of preference
+fn rendezvous(settings: &Settings, endpoint: &Endpoint) -> Result<Vec<Client>, PairingError> {
+    let clients = settings
+        .rendezvous
+        .iter()
         .map(|url| Client::new(url, endpoint.tls_config().clone()))
-        .transpose()?;
+        .collect::<Result<Vec<_>, _>>()?;
 
-    if client.as_ref().is_some_and(Client::is_unprotected) {
+    if clients.iter().any(Client::is_unprotected) {
         eprintln!(
-            "{} the rendezvous server is reached without TLS. What is exchanged stays \
+            "{} a rendezvous server is reached without TLS. What is exchanged stays \
              sealed, but the pairing can be watched and disturbed on the way. Use https.",
             "note:".yellow().bold()
         );
     }
 
-    Ok(client)
+    Ok(clients)
 }
 
 async fn send(
@@ -405,10 +405,22 @@ async fn send(
 
     // With a rendezvous server the receiver gets a short code, without one (or with
     // `--direct`) a ticket that carries the address and the key itself.
-    let client = if direct {
-        None
+    let servers = if direct {
+        Vec::new()
     } else {
         rendezvous(&settings, &endpoint)?
+    };
+    // The first server that answers gets the code. If none does that is an error, a
+    // ticket is not silently printed instead.
+    let client = match servers.is_empty() {
+        true => None,
+        false => Some(
+            qs_core::pairing::first_available(&servers)
+                .await
+                .map_err(|e| {
+                    format!("{e}\n`qsend send --direct` works without a rendezvous server.")
+                })?,
+        ),
     };
 
     // On Linux the clipboard content is gone once this is dropped,
@@ -417,7 +429,7 @@ async fn send(
 
     let sender_args = match client {
         Some(client) => {
-            let offer = Offer::create(&client, password.as_deref().map(String::as_str)).await?;
+            let offer = Offer::create(client, password.as_deref().map(String::as_str)).await?;
             set_pending_slot(Some(offer.handle()));
 
             let code = offer.code().to_string();
@@ -560,16 +572,18 @@ async fn pair(
 ) -> Result<EndpointAddr, Failure> {
     let code: Code = input.parse()?;
 
-    let Some(client) = rendezvous(settings, endpoint)? else {
+    let servers = rendezvous(settings, endpoint)?;
+    if servers.is_empty() {
         return Err(
             "this looks like a short code, but no rendezvous server is set. \
-             Use --rendezvous <url> or `rendezvous_url` in the config file"
+             Use --rendezvous <url> or `rendezvous` in the config file"
                 .into(),
         );
-    };
+    }
 
-    let claim = Claim::new(&client, code).await?;
-    set_pending_slot(Some(claim.handle()));
+    // Looking at the slot spends nothing. The code is only used up by `complete`, so
+    // giving up while being asked for the password leaves it valid.
+    let claim = Claim::find(&servers, code).await?;
 
     let password = match (claim.password_required(), password) {
         (true, None) => {
@@ -578,8 +592,6 @@ async fn pair(
         }
         (false, Some(_)) => {
             if !password::confirm_without()? {
-                claim.handle().cancel().await;
-                set_pending_slot(None);
                 return Err(PairingError::UnexpectedPassword.into());
             }
             None
@@ -590,7 +602,6 @@ async fn pair(
     let addr = claim
         .complete(password.as_deref().map(String::as_str), endpoint.id())
         .await?;
-    set_pending_slot(None);
 
     Ok(addr)
 }
@@ -733,10 +744,10 @@ fn show_config(settings: &Settings, path: Option<&std::path::Path>) -> Result<()
 
     println!("\nSettings in effect:");
     println!(
-        "  rendezvous_url = {}",
-        match &settings.rendezvous_url {
-            Some(url) => url.clone(),
-            None => "(none, tickets instead of short codes)".to_string(),
+        "  rendezvous     = {}",
+        match settings.rendezvous.is_empty() {
+            false => settings.rendezvous.join(", "),
+            true => "(none, tickets instead of short codes)".to_string(),
         }
     );
     println!("  relay          = {}", settings.relay);

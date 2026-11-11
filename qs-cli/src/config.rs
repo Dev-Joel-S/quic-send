@@ -4,8 +4,9 @@
 //! `quic-send/config.toml`. Flags on the command line override it.
 //!
 //! ```toml
-//! # Rendezvous server for short codes. Without one, qsend prints a ticket instead.
-//! rendezvous_url = "https://rendezvous.example.com"
+//! # Rendezvous servers for short codes, tried in this order. Without one, qsend prints
+//! # a ticket instead. No server is built into the program.
+//! rendezvous = ["https://rendezvous.example.com", "https://backup.example.org"]
 //! # "default", "disabled" or the URL of your own relay
 //! relay = "default"
 //! # Where received files go. "." is the directory qsend is started in.
@@ -110,7 +111,9 @@ impl<'de> Deserialize<'de> for RelaySetting {
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub rendezvous_url: Option<String>,
+    /// Rendezvous servers in order of preference. One url as a plain string works too.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub rendezvous: Option<Vec<String>>,
     pub relay: Option<RelaySetting>,
     pub output_dir: Option<PathBuf>,
     pub port: Option<u16>,
@@ -119,6 +122,23 @@ pub struct Config {
     /// Alias to endpoint id
     #[serde(default)]
     pub known_peers: BTreeMap<String, String>,
+}
+
+/// A list, or a single value where a list of one is meant
+fn one_or_many<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(Some(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(url) => vec![url],
+        OneOrMany::Many(urls) => urls,
+    }))
 }
 
 impl Config {
@@ -164,9 +184,10 @@ pub fn config_dir() -> Option<PathBuf> {
 /// Settings given on the command line, each overrides the config file
 #[derive(Debug, Default, Clone, clap::Args)]
 pub struct NetworkArgs {
-    /// Rendezvous server for short codes [default: from the config file, else none]
+    /// Rendezvous server for short codes. Give it several times for more than one, they
+    /// are tried in that order [default: from the config file, else none]
     #[clap(long, value_name = "URL", global = true)]
-    pub rendezvous: Option<String>,
+    pub rendezvous: Vec<String>,
 
     /// Relay server: "default", "disabled" or the URL of your own [default: default]
     #[clap(long, value_name = "RELAY", global = true)]
@@ -184,8 +205,9 @@ pub struct NetworkArgs {
 /// The settings in effect: command line, then config file, then defaults
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
-    /// [None] means no rendezvous server: tickets instead of short codes
-    pub rendezvous_url: Option<String>,
+    /// In order of preference. Empty means no rendezvous server: tickets instead of
+    /// short codes
+    pub rendezvous: Vec<String>,
     pub relay: RelaySetting,
     /// [None] means the Downloads folder
     pub output_dir: Option<PathBuf>,
@@ -198,16 +220,21 @@ pub struct Settings {
 
 impl Settings {
     pub fn resolve(args: &NetworkArgs, output: Option<PathBuf>, config: Config) -> Self {
-        let rendezvous_url = args
-            .rendezvous
-            .clone()
-            .or(config.rendezvous_url)
+        // The command line replaces the list of the file, it does not add to it
+        let rendezvous = if args.rendezvous.is_empty() {
+            config.rendezvous.unwrap_or_default()
+        } else {
+            args.rendezvous.clone()
+        };
+        let rendezvous = rendezvous
+            .iter()
             .map(|url| url.trim().to_string())
             // An empty value switches the rendezvous off, also from the command line
-            .filter(|url| !url.is_empty());
+            .filter(|url| !url.is_empty())
+            .collect();
 
         Self {
-            rendezvous_url,
+            rendezvous,
             relay: args.relay.clone().or(config.relay).unwrap_or_default(),
             output_dir: output.or(config.output_dir),
             port: args.port.or(config.port),
@@ -228,7 +255,7 @@ mod tests {
     fn empty_file_is_all_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
         let settings = Settings::resolve(&NetworkArgs::default(), None, Config::default());
-        assert_eq!(settings.rendezvous_url, None);
+        assert!(settings.rendezvous.is_empty());
         assert_eq!(settings.relay, RelaySetting::Default);
         assert_eq!(settings.output_dir, None);
         assert_eq!(settings.port, None);
@@ -238,7 +265,7 @@ mod tests {
     fn full_file() {
         let config = Config::parse(
             r#"
-            rendezvous_url = "https://rz.example.com"
+            rendezvous = ["https://rz.example.com", "https://backup.example.org"]
             relay = "disabled"
             output_dir = "."
             port = 4433
@@ -250,9 +277,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            config.rendezvous_url.as_deref(),
-            Some("https://rz.example.com")
+            config.rendezvous,
+            Some(vec![
+                "https://rz.example.com".to_string(),
+                "https://backup.example.org".to_string()
+            ])
         );
+        // One server does not need the brackets
+        assert_eq!(
+            Config::parse("rendezvous = \"https://rz.example.com\"")
+                .unwrap()
+                .rendezvous,
+            Some(vec!["https://rz.example.com".to_string()])
+        );
+        assert!(Config::parse("rendezvous = 5").is_err());
         assert_eq!(config.relay, Some(RelaySetting::Disabled));
         assert_eq!(config.output_dir, Some(PathBuf::from(".")));
         assert_eq!(config.port, Some(4433));
@@ -298,27 +336,27 @@ mod tests {
     fn flags_override_the_file() {
         let config = || {
             Config::parse(
-                "rendezvous_url = \"https://file\"\nrelay = \"disabled\"\noutput_dir = \"/file\"\nport = 1",
+                "rendezvous = [\"https://file\", \"https://file2\"]\nrelay = \"disabled\"\noutput_dir = \"/file\"\nport = 1",
             )
             .unwrap()
         };
 
         // Nothing on the command line: the file counts
         let settings = Settings::resolve(&NetworkArgs::default(), None, config());
-        assert_eq!(settings.rendezvous_url.as_deref(), Some("https://file"));
+        assert_eq!(settings.rendezvous, ["https://file", "https://file2"]);
         assert_eq!(settings.relay, RelaySetting::Disabled);
         assert_eq!(settings.output_dir, Some(PathBuf::from("/file")));
         assert_eq!(settings.port, Some(1));
 
         // Everything on the command line: the file is overridden
         let args = NetworkArgs {
-            rendezvous: Some("https://flag".to_string()),
+            rendezvous: vec!["https://flag".to_string()],
             relay: Some(RelaySetting::Default),
             port: Some(2),
             copy: false,
         };
         let settings = Settings::resolve(&args, Some(PathBuf::from(".")), config());
-        assert_eq!(settings.rendezvous_url.as_deref(), Some("https://flag"));
+        assert_eq!(settings.rendezvous, ["https://flag"]);
         assert_eq!(settings.relay, RelaySetting::Default);
         assert_eq!(settings.output_dir, Some(PathBuf::from(".")));
         assert_eq!(settings.port, Some(2));
@@ -344,16 +382,22 @@ mod tests {
 
     #[test]
     fn empty_rendezvous_switches_it_off() {
-        let config = Config::parse("rendezvous_url = \"https://file\"").unwrap();
+        let config = Config::parse("rendezvous = [\"https://file\"]").unwrap();
         let args = NetworkArgs {
-            rendezvous: Some(String::new()),
+            rendezvous: vec![String::new()],
             ..Default::default()
         };
-        assert_eq!(Settings::resolve(&args, None, config).rendezvous_url, None);
+        assert!(Settings::resolve(&args, None, config).rendezvous.is_empty());
 
-        let config = Config::parse("rendezvous_url = \"\"").unwrap();
-        let settings = Settings::resolve(&NetworkArgs::default(), None, config);
-        assert_eq!(settings.rendezvous_url, None);
+        for file in [
+            "rendezvous = \"\"",
+            "rendezvous = []",
+            "rendezvous = [\" \"]",
+        ] {
+            let config = Config::parse(file).unwrap();
+            let settings = Settings::resolve(&NetworkArgs::default(), None, config);
+            assert!(settings.rendezvous.is_empty(), "{file}");
+        }
     }
 
     #[test]

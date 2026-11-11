@@ -1,22 +1,30 @@
 //! Wire format of the quic-send rendezvous server, shared by the server
 //! (`qs-rendezvous`) and the client (`qs_core::pairing::rendezvous`).
 //!
+//! The full specification, for anyone who wants to write another server, is in
+//! `docs/rendezvous-api.md`. The Cloudflare Worker in `rendezvous-worker/` is such a
+//! second implementation, and the same tests run against both.
+//!
 //! The server is an untrusted mailbox. Two peers that share a short code exchange
 //! three opaque messages through one slot:
 //!
 //! | Step | Request | Who | Body |
 //! |------|---------|-----|------|
+//! | 0 | `GET /v1` | anyone | what the server is and which version of this API it speaks |
 //! | 1 | `POST /v1/slots` | sender | its first message, gets a nameplate and a token |
-//! | 2 | `POST /v1/slots/{nameplate}/claim` | receiver | gets the first message and a token, only once per slot |
-//! | 3 | `PUT /v1/slots/{nameplate}/reply` | receiver | its reply |
+//! | 2 | `GET /v1/slots/{nameplate}` | receiver | gets the first message. Free: changes nothing, can be repeated |
+//! | 3 | `PUT /v1/slots/{nameplate}/reply` | receiver | its reply, gets a token. Only once per slot |
 //! | 4 | `GET /v1/slots/{nameplate}/reply` | sender | waits for the reply |
 //! | 5 | `PUT /v1/slots/{nameplate}/address` | sender | its sealed address |
 //! | 6 | `GET /v1/slots/{nameplate}/address` | receiver | waits for the address, the slot is gone afterwards |
 //! | any | `DELETE /v1/slots/{nameplate}` | either | gives up |
 //!
-//! Requests after the first carry `Authorization: Bearer <token>`. `GET` requests take
-//! `?wait=<seconds>` and answer `204 No Content` if nothing arrived in that time.
-//! Bodies are JSON, binary messages are base64 (url safe, no padding).
+//! Looking at a slot (step 2) costs nothing. What a code can be used for once is the
+//! reply (step 3), because the reply is the one guess at the code its sender checks.
+//!
+//! Steps 4 to 6 and the delete carry `Authorization: Bearer <token>`. The waiting `GET`
+//! requests take `?wait=<seconds>` and answer `204 No Content` if nothing arrived in that
+//! time. Bodies are JSON, binary messages are base64 (url safe, no padding).
 //! Errors are a JSON [ErrorBody] with a fitting HTTP status.
 
 use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
@@ -47,11 +55,6 @@ pub fn slot_path(nameplate: &str) -> String {
     format!("{SLOTS_PATH}/{nameplate}")
 }
 
-/// Path to claim a slot
-pub fn claim_path(nameplate: &str) -> String {
-    format!("{SLOTS_PATH}/{nameplate}/claim")
-}
-
 /// Path of the reply of the receiver
 pub fn reply_path(nameplate: &str) -> String {
     format!("{SLOTS_PATH}/{nameplate}/reply")
@@ -80,16 +83,13 @@ pub struct SlotCreated {
     pub nameplate: String,
     /// Authorizes the sender's later requests for this slot
     pub token: String,
-    /// Seconds until the slot expires if nobody claims it
+    /// Seconds until the slot expires if nobody replies to it
     pub expires_in: u64,
 }
 
-/// Answer to claiming a slot
+/// Answer to storing the reply
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SlotClaimed {
-    /// The first message of the sender
-    #[serde(with = "base64_bytes")]
-    pub message: Vec<u8>,
+pub struct SlotReplied {
     /// Authorizes the receiver's later requests for this slot
     pub token: String,
     /// Seconds until the slot expires
@@ -109,9 +109,9 @@ pub struct ServerInfo {
 pub enum ErrorCode {
     /// No slot with this nameplate, and none that ended recently
     UnknownSlot,
-    /// The slot was already claimed or completed
+    /// The slot already has its reply, or was completed
     SlotUsed,
-    /// Nobody claimed the slot in time
+    /// Nobody replied to the slot in time
     SlotExpired,
     /// One side gave up
     SlotClosed,

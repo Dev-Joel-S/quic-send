@@ -8,17 +8,20 @@
 //! Messages through one slot (a PAKE needs both sides before a key exists, so a
 //! single upload is not enough):
 //! 1. sender to server: its PAKE message and a KEM key
-//! 2. receiver claims the slot (only once) and sends its PAKE message, the KEM
-//!    ciphertext and its sealed id
+//! 2. receiver fetches that message (free, as often as it likes) and sends its PAKE
+//!    message, the KEM ciphertext and its sealed id. A slot takes one such reply.
 //! 3. sender to server: its sealed address, the receiver fetches it
 //!
-//! DONE: the wire format has a version in its path (`/v1`) and lives in a small crate
-//!       that client and server share.
-//! DONE: HTTP client for the calls: create slot, upload, claim, fetch, delete. It is the
+//! DONE: the wire format has a version in its path (`/v1`) and in the answer of the
+//!       server to `GET /v1`, and lives in a small crate that client and server share.
+//!       [Client::check] asks a server what it is before it is used.
+//! DONE: HTTP client for the calls: create slot, look, reply, fetch, delete. It is the
 //!       `reqwest` that iroh already uses, with TLS through the crypto provider of the
 //!       endpoint, so it builds for static musl and Windows like the rest.
-//! DONE: one claim per slot is enforced by the server and tested there and in
-//!       `tests/pairing.rs` from the client side.
+//! DONE: one reply per slot is enforced by the server and tested there and in
+//!       `tests/pairing.rs` from the client side. Looking at a slot spends nothing.
+//! DONE: a server that answers "nothing yet" at once is not asked again right away
+//!       ([MIN_POLL_INTERVAL]), so it cannot make the client spin.
 //! DONE: errors are told apart: wrong code, expired, already used, server unreachable,
 //!       not a rendezvous server or another protocol version (see `super::PairingError`).
 //! DONE: both sides delete the slot when a pairing fails ([Client::delete]).
@@ -29,17 +32,20 @@
 //!       Ctrl+C.
 
 use qs_rendezvous_api::{
-    address_path, claim_path, reply_path, slot_path, ErrorBody, ErrorCode, Message, SlotClaimed,
-    SlotCreated, MAX_WAIT_SECS, SLOTS_PATH,
+    address_path, reply_path, slot_path, ErrorBody, ErrorCode, Message, ServerInfo, SlotCreated,
+    SlotReplied, API_VERSION, INFO_PATH, MAX_WAIT_SECS, SERVICE_NAME, SLOTS_PATH,
 };
 use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long a request may take that does not wait for the other peer
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long to wait for a connection to the server
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A server may answer "nothing yet" before the wait is over. It is then not asked again
+/// sooner than this.
+const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Largest answer the client reads. A message is at most 16 KiB before base64.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 
@@ -129,20 +135,48 @@ impl Client {
         expect_body(send(request, REQUEST_TIMEOUT).await?)
     }
 
-    /// Claim a slot. Works once per slot.
-    pub(crate) async fn claim(&self, nameplate: &str) -> Result<SlotClaimed, ClientError> {
-        let request = self.http.post(self.url_for(&claim_path(nameplate)));
-        expect_body(send(request, REQUEST_TIMEOUT).await?)
+    /// Ask the server what it is, and fail unless it is a rendezvous server that speaks
+    /// the version of the API this client does
+    pub(crate) async fn check(&self) -> Result<(), ClientError> {
+        let request = self.http.get(self.url_for(INFO_PATH));
+        let info: ServerInfo = expect_body(send(request, REQUEST_TIMEOUT).await?)?;
+
+        if info.service != SERVICE_NAME {
+            return Err(ClientError::Protocol(
+                "this is not a quic-send rendezvous server".to_string(),
+            ));
+        }
+        if info.api != API_VERSION {
+            return Err(ClientError::Protocol(format!(
+                "the server speaks version {} of the rendezvous protocol, this program \
+                 version {API_VERSION}",
+                info.api
+            )));
+        }
+        Ok(())
     }
 
-    /// Store the reply of the receiver
+    /// The first message of a slot. Spends nothing, a slot can be looked at any number
+    /// of times.
+    pub(crate) async fn look(&self, nameplate: &str) -> Result<Vec<u8>, ClientError> {
+        let request = self.http.get(self.url_for(&slot_path(nameplate)));
+        let message: Message = expect_body(send(request, REQUEST_TIMEOUT).await?)?;
+        Ok(message.message)
+    }
+
+    /// Store the reply of the receiver. Works once per slot, this is what spends a code.
     pub(crate) async fn put_reply(
         &self,
         nameplate: &str,
-        token: &str,
         message: &[u8],
-    ) -> Result<(), ClientError> {
-        self.put(&reply_path(nameplate), token, message).await
+    ) -> Result<SlotReplied, ClientError> {
+        let request = self
+            .http
+            .put(self.url_for(&reply_path(nameplate)))
+            .json(&Message {
+                message: message.to_vec(),
+            });
+        expect_body(send(request, REQUEST_TIMEOUT).await?)
     }
 
     /// Store the sealed address of the sender
@@ -152,7 +186,16 @@ impl Client {
         token: &str,
         message: &[u8],
     ) -> Result<(), ClientError> {
-        self.put(&address_path(nameplate), token, message).await
+        let request = self
+            .http
+            .put(self.url_for(&address_path(nameplate)))
+            .bearer_auth(token)
+            .json(&Message {
+                message: message.to_vec(),
+            });
+        send::<serde::de::IgnoredAny>(request, REQUEST_TIMEOUT)
+            .await
+            .map(|_| ())
     }
 
     /// Wait a while for the reply of the receiver. [None] means: not yet, ask again.
@@ -184,28 +227,23 @@ impl Client {
         }
     }
 
-    async fn put(&self, path: &str, token: &str, message: &[u8]) -> Result<(), ClientError> {
-        let request = self
-            .http
-            .put(self.url_for(path))
-            .bearer_auth(token)
-            .json(&Message {
-                message: message.to_vec(),
-            });
-        send::<serde::de::IgnoredAny>(request, REQUEST_TIMEOUT)
-            .await
-            .map(|_| ())
-    }
-
     async fn poll(&self, path: &str, token: &str) -> Result<Option<Vec<u8>>, ClientError> {
         let url = format!("{}?wait={MAX_WAIT_SECS}", self.url_for(path));
         let request = self.http.get(url).bearer_auth(token);
         // The server answers after the wait at the latest, give it some room on top
         let timeout = Duration::from_secs(MAX_WAIT_SECS) + REQUEST_TIMEOUT;
 
-        Ok(send::<Message>(request, timeout)
-            .await?
-            .map(|message| message.message))
+        let asked = Instant::now();
+        let message = send::<Message>(request, timeout).await?;
+
+        // Nothing yet, and the server did not wait: do that here instead
+        if message.is_none() {
+            if let Some(rest) = MIN_POLL_INTERVAL.checked_sub(asked.elapsed()) {
+                tokio::time::sleep(rest).await;
+            }
+        }
+
+        Ok(message.map(|message| message.message))
     }
 }
 

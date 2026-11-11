@@ -79,7 +79,7 @@ on the other peer, run the following command:
 qsend receive K7X4-M2QP
 ```
 
-The receiver needs the same rendezvous server. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
+The receiver needs the same rendezvous server. Several can be listed (`rendezvous = [...]` in the config file, or `--rendezvous` more than once): the sender uses the first one that answers, the receiver looks for the code on them in the same order. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
 
 Both sides print a short fingerprint of their own id and of the peer's (`This device`, `Sender`, `Receiver`). Compare them if you want to be sure who is on the other end.
 
@@ -174,8 +174,9 @@ If a peer is saved after a transfer with a plain ticket and no password, the sen
 ```toml
 # ~/.config/quic-send/config.toml on Linux
 
-# Rendezvous server for short codes. Without one, qsend prints a ticket instead.
-rendezvous_url = "https://rz.example.com"
+# Rendezvous servers for short codes, tried in this order. Without one, qsend prints
+# a ticket instead. No server is built into the program.
+rendezvous = ["https://rz.example.com", "https://backup.example.org"]
 # "default", "disabled" or the URL of your own relay
 relay = "default"
 # Where received files go. "." is the directory qsend is started in.
@@ -216,7 +217,9 @@ Only use `--behind-proxy` behind a proxy that sets `X-Forwarded-For` itself, oth
 
 Plain `http://` works too, for a server on your own network. The messages stay sealed, but the pairing can be watched and disturbed on the way, and `qsend` says so.
 
-A code is valid for five minutes (`--ttl`) and good for one attempt. That one attempt is what makes a six character secret enough, and it also means that anyone who can reach the server can use up codes by claiming their slots without knowing them. They learn nothing, but the pairing fails. On a server that is open to the internet, expect that this can happen.
+A code is valid for five minutes (`--ttl`) and good for one attempt. That one attempt is what makes a six character secret enough. Looking at a slot is not an attempt: anyone can fetch the first message of any of the 1024 slots as often as they like, it gives nothing away and changes nothing. What uses up a code is a reply to its slot, right or wrong. So somebody who can reach the server can still make a pairing fail by sending a wrong reply before the real receiver does. They learn nothing, and the server limits replies per address, but on a server that is open to the internet expect that this can happen.
+
+What a server has to do is written down in [docs/rendezvous-api.md](docs/rendezvous-api.md), with a version in the protocol, so another implementation can take its place.
 
 ### Your own relay
 

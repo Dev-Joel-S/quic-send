@@ -2,7 +2,7 @@
 
 use iroh::{endpoint::presets, Endpoint, EndpointAddr, RelayMode};
 use qs_core::{
-    pairing::{code::Code, rendezvous::Client, Claim, Offer, PairingError},
+    pairing::{code::Code, first_available, rendezvous::Client, Claim, Offer, PairingError},
     receive::{Receiver, ReceiverArgs},
     send::{Sender, SenderArgs},
     QS_ALPN,
@@ -52,7 +52,11 @@ fn typed(offer: &Offer) -> Code {
 
 /// The same code with one character of the secret changed
 fn mistyped(offer: &Offer) -> Code {
-    let text = offer.code().to_string();
+    mistyped_from(offer.code())
+}
+
+fn mistyped_from(code: &Code) -> Code {
+    let text = code.to_string();
     let last = if text.ends_with('0') { '1' } else { '0' };
     format!("{}{last}", &text[..text.len() - 1])
         .parse()
@@ -153,20 +157,36 @@ async fn wrong_code_fails_on_both_sides_and_burns_the_code() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn code_can_be_claimed_only_once() {
+async fn looking_is_free_and_a_code_takes_one_reply() {
     let url = server(Config::default()).await;
     let send_ep = endpoint().await;
     let recv_ep = endpoint().await;
     let other_ep = endpoint().await;
+    let send_addr = local_addr(&send_ep);
 
     let offer = Offer::create(&client(&url, &send_ep), None).await.unwrap();
+    let code = typed(&offer);
+    let send = tokio::spawn(async move { offer.wait_for_receiver(&send_addr).await });
 
-    let first = Claim::new(&client(&url, &recv_ep), typed(&offer)).await;
-    assert!(first.is_ok());
+    // Somebody who guesses the slot looks at it, again and again. That spends nothing.
+    for _ in 0..3 {
+        let stranger = Claim::new(&client(&url, &other_ep), mistyped_from(&code)).await;
+        assert!(stranger.is_ok());
+    }
+    // Somebody who also knows the code looks as well, but is slower with the rest
+    let second = Claim::new(&client(&url, &other_ep), code.clone())
+        .await
+        .unwrap();
 
-    // Somebody who also knows the code, or guesses the slot, comes too late
-    let second = Claim::new(&client(&url, &other_ep), typed(&offer)).await;
-    assert_eq!(second.err(), Some(PairingError::Used));
+    // The receiver is not disturbed by any of that
+    let first = Claim::new(&client(&url, &recv_ep), code).await.unwrap();
+    let addr = first.complete(None, recv_ep.id()).await.unwrap();
+    assert_eq!(addr.id, send_ep.id());
+    assert_eq!(send.await.unwrap(), Ok(recv_ep.id()));
+
+    // One reply per code: whoever comes second is too late, even with the right code
+    let late = second.complete(None, other_ep.id()).await;
+    assert_eq!(late, Err(PairingError::Used));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -222,6 +242,14 @@ async fn missing_password_is_noticed_before_guessing() {
     assert!(claim.password_required());
     let result = claim.complete(None, recv_ep.id()).await;
     assert_eq!(result, Err(PairingError::PasswordRequired));
+
+    // Nothing was sent, so the code is not spent: with the password it still works
+    let code = typed(&offer);
+    let send_addr = local_addr(&send_ep);
+    let send = tokio::spawn(async move { offer.wait_for_receiver(&send_addr).await });
+    let claim = Claim::new(&client(&url, &recv_ep), code).await.unwrap();
+    assert!(claim.complete(Some("hunter2"), recv_ep.id()).await.is_ok());
+    assert_eq!(send.await.unwrap(), Ok(recv_ep.id()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -262,17 +290,82 @@ async fn giving_up_tells_the_other_side() {
     let claim = Claim::new(&client(&url, &recv_ep), code).await;
     assert_eq!(claim.err(), Some(PairingError::Used));
 
-    // The receiver gives up after claiming: the sender stops waiting
+    // The receiver looks at the slot and walks away, for example at the password prompt.
+    // Nothing was spent, the code still works.
     let offer = Offer::create(&client(&url, &send_ep), None).await.unwrap();
-    let claim = Claim::new(&client(&url, &recv_ep), typed(&offer))
-        .await
-        .unwrap();
-    claim.handle().cancel().await;
+    let code = typed(&offer);
     let send_addr = local_addr(&send_ep);
-    let waited = tokio::time::timeout(Duration::from_secs(10), offer.wait_for_receiver(&send_addr))
-        .await
-        .expect("the sender must notice that the receiver gave up");
-    assert_eq!(waited, Err(PairingError::ReceiverGaveUp));
+    let send = tokio::spawn(async move { offer.wait_for_receiver(&send_addr).await });
+
+    let claim = Claim::new(&client(&url, &recv_ep), code.clone()).await;
+    assert!(claim.is_ok());
+    drop(claim);
+
+    let again = Claim::new(&client(&url, &recv_ep), code).await.unwrap();
+    assert!(again.complete(None, recv_ep.id()).await.is_ok());
+    assert_eq!(send.await.unwrap(), Ok(recv_ep.id()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn servers_are_tried_in_order() {
+    let send_ep = endpoint().await;
+    let recv_ep = endpoint().await;
+    let send_addr = local_addr(&send_ep);
+
+    // One server that is down, one that is no rendezvous server, two that work
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let foreign = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, axum::Router::new()).await });
+    let empty = server(Config::default()).await;
+    let url = server(Config::default()).await;
+
+    // The sender takes the first one that answers as a rendezvous server
+    let servers = [
+        client(&dead, &send_ep),
+        client(&foreign, &send_ep),
+        client(&url, &send_ep),
+        client(&empty, &send_ep),
+    ];
+    let chosen = first_available(&servers).await.unwrap();
+    assert_eq!(chosen.url(), url);
+    let offer = Offer::create(chosen, None).await.unwrap();
+    let code = typed(&offer);
+    let send = tokio::spawn(async move { offer.wait_for_receiver(&send_addr).await });
+
+    // The receiver has another server in front that works but does not know the code
+    let servers = [
+        client(&dead, &recv_ep),
+        client(&empty, &recv_ep),
+        client(&url, &recv_ep),
+    ];
+    let claim = Claim::find(&servers, code.clone()).await.unwrap();
+    assert!(claim.complete(None, recv_ep.id()).await.is_ok());
+    assert_eq!(send.await.unwrap(), Ok(recv_ep.id()));
+
+    // A code no server knows
+    let unknown = Claim::find(&servers[..2], "ZZZZ-ZZZZ".parse().unwrap()).await;
+    assert_eq!(unknown.err(), Some(PairingError::Unknown));
+
+    // No server that can be used: every one is named with what is wrong with it
+    let servers = [client(&dead, &send_ep), client(&foreign, &send_ep)];
+    match first_available(&servers).await.err() {
+        Some(PairingError::NoServer(text)) => {
+            assert!(text.contains(&dead) && text.contains(&foreign), "{text}");
+        }
+        other => panic!("expected no usable server, got {other:?}"),
+    }
+    assert!(matches!(
+        Claim::find(&servers, code).await.err(),
+        Some(PairingError::NoServer(_))
+    ));
+    // With a single server the error is the one of that server
+    assert!(matches!(
+        first_available(&servers[..1]).await.err(),
+        Some(PairingError::Unreachable { .. })
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
