@@ -1,23 +1,147 @@
 name: Release
 
+# A tag `v<version>` builds and publishes a release. A tag with a "-" in it, like
+# `v1.2.0-rc1`, becomes a prerelease.
+#
+# To try the whole thing without leaving anything behind, start the workflow by hand and
+# give it a test tag such as `v0.0.1-test`: it is published as a prerelease, the uploaded
+# files are downloaded and checked, and then release and tag are removed again.
+# Started by hand without a tag, the workflow only builds.
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      test_tag:
+        description: "Tag for a test release, has to end in -test (v0.0.1-test). Empty: only build"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
-
-# TODO: this workflow has never run. Start it once by hand (workflow_dispatch) and check
-#       that the MSVC build, `cargo deb` and the artifacts work before tagging a release.
 
 # Jobs may only read the repository, unless one asks for more itself
 permissions:
   contents: read
 
 jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      cleanup: ${{ steps.plan.outputs.cleanup }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Decide what this run does
+        id: plan
+        env:
+          TEST_TAG: ${{ inputs.test_tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' qs-cli/Cargo.toml | head -n 1)
+
+          if [ "$REF_TYPE" = tag ]; then
+            tag=$REF_NAME
+          elif [ -n "$TEST_TAG" ]; then
+            if ! printf '%s' "$TEST_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-test$'; then
+              echo "::error::a test tag looks like v0.0.1-test"
+              exit 1
+            fi
+            tag=$TEST_TAG
+          else
+            tag=""
+          fi
+
+          cleanup=false
+          prerelease=false
+          case "$tag" in
+            "") version="$crate-dev"; publish=false ;;
+            *-test) version=${tag#v}; publish=true; prerelease=true; cleanup=true ;;
+            *-*) version=${tag#v}; publish=true; prerelease=true ;;
+            *) version=${tag#v}; publish=true ;;
+          esac
+
+          # A real release has the version the program reports
+          if [ "$publish" = true ] && [ "$cleanup" = false ] && [ "${version%%-*}" != "$crate" ]; then
+            echo "::error::the tag says $version, qs-cli/Cargo.toml says $crate"
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "prerelease=$prerelease"
+            echo "cleanup=$cleanup"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  source:
+    name: Source archive and PKGBUILD
+    needs: plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The archive is built here and uploaded to the release as a file. Its checksum goes
+      # into the PKGBUILD, so the two always fit together.
+      - name: Build the source archive
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          mkdir dist
+          git archive --format=tar.gz --prefix="quic-send-$VERSION/" \
+            -o "dist/quic-send-$VERSION.tar.gz" HEAD
+          sum=$(sha256sum "dist/quic-send-$VERSION.tar.gz" | cut -d ' ' -f 1)
+
+          sed -e "s/^pkgver=.*/pkgver=$(printf '%s' "$VERSION" | tr - _)/" \
+              -e "s/^_version=.*/_version=$VERSION/" \
+              -e "s/^sha256sums=.*/sha256sums=('$sum')/" \
+              packaging/arch/PKGBUILD > dist/PKGBUILD
+          grep -E '^(pkgver|_version|sha256sums)=' dist/PKGBUILD
+          grep -q "^sha256sums=('$sum')$" dist/PKGBUILD
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source
+          path: dist/*
+
+  arch:
+    name: Arch Linux (build the PKGBUILD)
+    needs: [plan, source]
+    runs-on: ubuntu-latest
+    # Only used to try the PKGBUILD, nothing built in here is published
+    container: archlinux:base-devel
+
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: source
+          path: pkg
+
+      # makepkg finds the source archive next to the PKGBUILD, checks it against the
+      # checksum in the PKGBUILD and does not download anything
+      - name: Build, test and install the package
+        run: |
+          pacman -Syu --noconfirm --needed rust
+          useradd -m build
+          chown -R build pkg
+          cd pkg
+          sudo -u build makepkg --noconfirm
+          pacman -U --noconfirm quic-send-*.pkg.tar.zst
+          qsend --version
+
   linux:
     name: Linux (static musl, .deb)
+    needs: plan
     runs-on: ubuntu-latest
 
     steps:
@@ -37,14 +161,21 @@ jobs:
         run: cargo build --release --locked -p qs-cli -p qs-rendezvous --target x86_64-unknown-linux-musl
 
       - name: Package
-        shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          version=$(cargo pkgid -p qs-cli | sed 's/.*[#@]//')
-          mkdir -p dist "qsend-$version-x86_64-linux"
-          cp target/x86_64-unknown-linux-musl/release/{qsend,qs-rendezvous} README.md LICENSE "qsend-$version-x86_64-linux/"
-          cp packaging/qs-rendezvous.service "qsend-$version-x86_64-linux/"
-          tar czf "dist/qsend-$version-x86_64-linux.tar.gz" "qsend-$version-x86_64-linux"
+          bin=target/x86_64-unknown-linux-musl/release
+          file "$bin/qsend" | grep -q static
+          "$bin/qsend" --version
+
+          name="qsend-$VERSION-x86_64-linux"
+          mkdir -p dist "$name"
+          cp "$bin/qsend" "$bin/qs-rendezvous" README.md LICENSE packaging/qs-rendezvous.service "$name/"
+          tar czf "dist/$name.tar.gz" "$name"
+
           cargo deb -p qs-cli --target x86_64-unknown-linux-musl --no-build --output dist/
+          sudo dpkg -i dist/*.deb
+          /usr/bin/qsend --version
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -53,6 +184,7 @@ jobs:
 
   windows:
     name: Windows
+    needs: plan
     runs-on: windows-latest
 
     steps:
@@ -65,11 +197,15 @@ jobs:
 
       - name: Package
         shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          version=$(cargo pkgid -p qs-cli | sed 's/.*[#@]//')
+          exe=target/x86_64-pc-windows-msvc/release/qsend.exe
+          "$exe" --version
+
           mkdir -p dist
-          cp target/x86_64-pc-windows-msvc/release/qsend.exe "dist/qsend-$version-x86_64-windows.exe"
-          7z a "dist/qsend-$version-x86_64-windows.zip" ./target/x86_64-pc-windows-msvc/release/qsend.exe README.md LICENSE
+          cp "$exe" "dist/qsend-$VERSION-x86_64-windows.exe"
+          7z a "dist/qsend-$VERSION-x86_64-windows.zip" "./$exe" README.md LICENSE
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -78,9 +214,8 @@ jobs:
 
   release:
     name: Publish release
-    needs: [linux, windows]
-    # A manual run only builds, there is no tag to release then
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [plan, source, arch, linux, windows]
+    if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,7 +232,74 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Upload to the GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          files: dist/*
+      # For a tag that was pushed the tag exists. For a test tag the release creates it,
+      # at the commit this run was started for.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" \
+            --generate-notes "${flags[@]}"
+
+  verify:
+    name: Check what was published
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+
+    steps:
+      # Without a token, like anybody who downloads the release
+      - name: Download the release and check it
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          base="https://github.com/$REPO/releases/download/$TAG"
+          for file in SHA256SUMS PKGBUILD "quic-send-$VERSION.tar.gz" \
+              "qsend-$VERSION-x86_64-linux.tar.gz" "qsend-$VERSION-x86_64-windows.exe" \
+              "qsend-$VERSION-x86_64-windows.zip"; do
+            curl -fsSL --retry 5 --retry-delay 3 -o "$file" "$base/$file"
+          done
+          sha256sum --check --ignore-missing SHA256SUMS
+
+          # The PKGBUILD points at the archive of this release and has its checksum
+          sum=$(sha256sum "quic-send-$VERSION.tar.gz" | cut -d ' ' -f 1)
+          grep -q "^sha256sums=('$sum')$" PKGBUILD
+          grep -q "^_version=$VERSION$" PKGBUILD
+
+          tar xzf "qsend-$VERSION-x86_64-linux.tar.gz"
+          "qsend-$VERSION-x86_64-linux/qsend" --version
+          "qsend-$VERSION-x86_64-linux/qs-rendezvous" --version
+
+  cleanup:
+    name: Remove the test release
+    needs: [plan, release, verify]
+    # Also when publishing or checking failed, so a test never leaves a release behind
+    if: always() && needs.plan.outputs.cleanup == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Delete release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          case "$TAG" in
+            *-test) ;;
+            *) echo "::error::refusing to delete $TAG, it is no test tag"; exit 1 ;;
+          esac
+          gh release delete "$TAG" --cleanup-tag --yes || echo "no release to delete"
+          # If the release was never created, a tag may still be there
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" 2>/dev/null || true
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::the test release is still there"
+            exit 1
+          fi

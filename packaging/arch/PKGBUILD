@@ -1,10 +1,22 @@
 # Maintainer: Joel Summa <74009152+Dev-Joel-S@users.noreply.github.com>
 #
-# Builds quic-send from the source of a tagged release.
-# After bumping pkgver, run `updpkgsums` to fill in the checksum.
+# Builds quic-send from the source archive of a release.
+#
+# This file is the template. For every release the release workflow fills in the version
+# and the checksum of the source archive it built, builds the package once on Arch to see
+# that it works, and attaches the finished PKGBUILD to the release. Take that one:
+#
+#   curl -LO https://github.com/dev-joel-s/quic-send/releases/latest/download/PKGBUILD
+#   makepkg -si
+#
+# The source is the archive the workflow uploads to the release, not the one GitHub makes
+# for a tag on its own: that one is generated on request and its checksum is not promised
+# to stay the same.
 
 pkgname=quic-send
 pkgver=0.5.0
+# The version as it is in the tag. It can have a "-" in it, which pkgver cannot.
+_version=0.5.0
 pkgrel=1
 pkgdesc="Peer-to-peer file transfer over QUIC"
 arch=('x86_64' 'aarch64')
@@ -12,32 +24,32 @@ url="https://github.com/dev-joel-s/quic-send"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# TODO: replace SKIP with the real checksum (`updpkgsums`) once a v0.5.0 tag exists,
-#       then build once with `makepkg` in a clean chroot.
+source=("$pkgname-$_version.tar.gz::$url/releases/download/v$_version/$pkgname-$_version.tar.gz")
+# Filled in by the release workflow
 sha256sums=('SKIP')
 
 prepare() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname-$_version"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname-$_version"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release -p qs-cli
 }
 
 check() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname-$_version"
   export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
   cargo test --frozen --workspace
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname-$_version"
   install -Dm755 target/release/qsend "$pkgdir/usr/bin/qsend"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

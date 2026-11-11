@@ -41,7 +41,7 @@ Prebuilt downloads are on the [releases page](https://github.com/dev-joel-s/quic
 
 `SHA256SUMS` lists the checksums of all files.
 
-On Arch Linux, build the package with the [PKGBUILD](packaging/arch/PKGBUILD) (`makepkg -si` in that directory).
+On Arch Linux, download the `PKGBUILD` that is attached to the release and run `makepkg -si` next to it. It builds from the source archive of that release and has its checksum.
 
 From source, with a Rust toolchain:
 
