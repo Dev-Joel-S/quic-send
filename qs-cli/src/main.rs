@@ -40,7 +40,12 @@ mod peers;
 mod ui;
 
 #[derive(Parser, Debug)]
-#[clap(version = QS_PROTO_VERSION, author = env!("CARGO_PKG_AUTHORS"))]
+#[clap(
+    name = "qsend",
+    version = QS_PROTO_VERSION,
+    author = env!("CARGO_PKG_AUTHORS"),
+    about = "Send files and folders from one computer to another, peer to peer over QUIC"
+)]
 struct Args {
     /// Log level
     #[clap(long, short, default_value = "error", global = true)]

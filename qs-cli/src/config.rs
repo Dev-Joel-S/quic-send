@@ -12,8 +12,8 @@
 //! output_dir = "/home/me/Downloads"
 //! # Fixed UDP port instead of a random one
 //! port = 4433
-//! # Copy codes and tickets to the clipboard, on by default
-//! clipboard = true
+//! # Copy codes and tickets to the clipboard, off by default
+//! clipboard = false
 //!
 //! [known_peers]
 //! homelab = "<endpoint id>"
@@ -176,9 +176,9 @@ pub struct NetworkArgs {
     #[clap(long, global = true)]
     pub port: Option<u16>,
 
-    /// Do not copy the code or ticket to the clipboard
+    /// Copy the code or ticket to the clipboard [default: from the config file, else off]
     #[clap(long, global = true)]
-    pub no_clipboard: bool,
+    pub copy: bool,
 }
 
 /// The settings in effect: command line, then config file, then defaults
@@ -211,8 +211,9 @@ impl Settings {
             relay: args.relay.clone().or(config.relay).unwrap_or_default(),
             output_dir: output.or(config.output_dir),
             port: args.port.or(config.port),
-            // The flag can only switch it off, like the setting in the file
-            clipboard: !args.no_clipboard && config.clipboard.unwrap_or(true),
+            // Off unless asked for. A clipboard history, or a clipboard that is synced to
+            // other devices, would get a secret nobody put there on purpose.
+            clipboard: args.copy || config.clipboard.unwrap_or(false),
             known_peers: config.known_peers,
         }
     }
@@ -314,7 +315,7 @@ mod tests {
             rendezvous: Some("https://flag".to_string()),
             relay: Some(RelaySetting::Default),
             port: Some(2),
-            no_clipboard: false,
+            copy: false,
         };
         let settings = Settings::resolve(&args, Some(PathBuf::from(".")), config());
         assert_eq!(settings.rendezvous_url.as_deref(), Some("https://flag"));
@@ -324,21 +325,21 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_is_on_unless_switched_off() {
-        let resolve = |no_clipboard, file: &str| {
+    fn clipboard_is_off_unless_asked_for() {
+        let resolve = |copy, file: &str| {
             let args = NetworkArgs {
-                no_clipboard,
+                copy,
                 ..Default::default()
             };
             Settings::resolve(&args, None, Config::parse(file).unwrap()).clipboard
         };
 
-        assert!(resolve(false, ""));
-        assert!(resolve(false, "clipboard = true"));
+        assert!(!resolve(false, ""));
         assert!(!resolve(false, "clipboard = false"));
-        assert!(!resolve(true, ""));
-        // The flag wins over a file that switches it on
-        assert!(!resolve(true, "clipboard = true"));
+        assert!(resolve(false, "clipboard = true"));
+        assert!(resolve(true, ""));
+        // The flag asks for this one transfer, whatever the file says
+        assert!(resolve(true, "clipboard = false"));
     }
 
     #[test]

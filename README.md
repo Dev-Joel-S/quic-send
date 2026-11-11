@@ -57,7 +57,7 @@ Without a rendezvous server, the sender prints a ticket that carries its address
 
 ```
 $ qsend send <file/folder>
-Ticket (copied to your clipboard):
+Ticket:
 
 qs1:TYXpn-lm8ladLNDYvhrI_nKROlu2vy2HvxDI6Ync2pIBAQDAAAICme8C
 
@@ -70,7 +70,7 @@ With a rendezvous server (see [below](#running-a-rendezvous-server)), it shows a
 
 ```
 $ qsend send --rendezvous https://rz.example.com <file/folder>
-Code (copied to your clipboard):
+Code:
 
 K7X4-M2QP
 
@@ -182,8 +182,8 @@ relay = "default"
 output_dir = "/home/me/Downloads"
 # Fixed UDP port instead of a random one
 port = 4433
-# Copy codes and tickets to the clipboard, on by default
-clipboard = true
+# Copy codes and tickets to the clipboard, off by default
+clipboard = false
 
 # Peers by id, in addition to the ones saved with --save-peer
 [known_peers]
@@ -252,7 +252,7 @@ What you should know before relying on it:
 
 - The PAKE is CPace on ristretto255 from the [`pake-cpace`](https://crates.io/crates/pake-cpace) crate, which has not had an independent audit and is an early variant of CPace, not byte for byte the CFRG draft. The ML-KEM-768 of a pairing is the formally verified one from [libcrux](https://github.com/cryspen/libcrux) (`libcrux-ml-kem`). Everything else cryptographic comes from [aws-lc-rs](https://github.com/aws/aws-lc-rs) and rustls, including the hybrid key exchange of the QUIC connection.
 - CPace is not a post-quantum PAKE, no audited one exists. What a pairing has against a quantum computer: the key that seals the peer address also depends on ML-KEM-768, so a recorded pairing stays sealed, and CPace has no fixed constants whose one-time break would open every code, each single guess of a code costs an attacker a discrete logarithm of its own.
-- Codes and tickets are copied to the clipboard. A clipboard history or a synced clipboard can show them to others before they are used. `--no-clipboard`, or `clipboard = false` in the config file, switches that off.
+- Codes and tickets are not copied to the clipboard unless you ask for it, with `--copy` or `clipboard = true` in the config file. A clipboard history or a synced clipboard (Windows can sync it to the cloud) would show them to others before they are used.
 - The code of this fork has not been audited by anyone outside either.
 
 ## License
