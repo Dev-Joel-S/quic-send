@@ -24,6 +24,10 @@ url="https://github.com/dev-joel-s/quic-send"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
+# makepkg compiles C code with link time optimization by default. The C code of the crypto
+# library aws-lc is then stored in a form the Rust linker cannot read, and linking fails
+# with undefined symbols. The Rust code is still optimized across crates by cargo.
+options=('!lto')
 source=("$pkgname-$_version.tar.gz::$url/releases/download/v$_version/$pkgname-$_version.tar.gz")
 # Filled in by the release workflow
 sha256sums=('SKIP')
