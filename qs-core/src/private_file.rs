@@ -7,6 +7,7 @@
 //!       off. Without that, a file takes over whatever its directory allows.
 //! DONE: the access rights are set on the empty file, before the secret is written into it
 //!       ([write]). [is_private] reads them back, the tests check a written file with it.
+//!       That check needs real Windows, which CI has. Wine keeps no access lists.
 //! DONE: this is one layer, not the whole protection: an administrator, a backup that runs
 //!       with the user's rights or another system that mounts the disk still read the file.
 //!       For that the identity key can be sealed with a passphrase, see `crate::peers`.

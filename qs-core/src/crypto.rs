@@ -18,7 +18,8 @@
 //!       that only offers X25519 is refused in both directions.
 //! DONE: the static musl build and the Windows GNU build compile with aws-lc-rs (checked
 //!       locally). `prebuilt-nasm` is enabled so the MSVC build needs no assembler.
-//! TODO: confirm the MSVC build in CI, it could not be built locally.
+//! DONE: the MSVC build is confirmed in CI: the checks and the release workflow build with
+//!       it on Windows and run the tests there.
 
 use rustls::{
     crypto::{aws_lc_rs, CryptoProvider},
