@@ -195,7 +195,12 @@ A mistake in the file, including a setting that does not exist, is an error with
 
 ## Running a rendezvous server
 
-The rendezvous server is in this repo (`qs-rendezvous`) and in the Linux download. It passes three opaque messages between the two peers of a pairing, keeps everything in memory and has no secrets.
+No rendezvous server is built into `qsend`. Short codes need one that you or somebody you know runs, and its address in the config file of both sides. There are two implementations of the same API ([docs/rendezvous-api.md](docs/rendezvous-api.md)), a client cannot tell them apart:
+
+- A **Cloudflare Worker**, in [rendezvous-worker](rendezvous-worker/). This is the one to start with: no machine to look after, `npx wrangler deploy` and it runs. Every code has its own Durable Object.
+- The **Rust server** `qs-rendezvous`, in this repo and in the Linux download, for your own machine.
+
+Both pass three opaque messages between the two peers of a pairing and have no secrets. The rest of this section is about the Rust server, which keeps everything in memory.
 
 ```
 $ qs-rendezvous --listen 127.0.0.1:8080

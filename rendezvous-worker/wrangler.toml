@@ -1,0 +1,65 @@
+# Rendezvous server for quic-send as a Cloudflare Worker.
+# `npx wrangler deploy` in this directory puts it on your account, see README.md.
+
+name = "quic-send-rendezvous"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# One Durable Object per nameplate keeps the slot of that code.
+[[durable_objects.bindings]]
+name = "SLOT"
+class_name = "Slot"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Slot"]
+
+# Nothing is logged. Slot names never end up next to client addresses.
+[observability]
+enabled = false
+
+[vars]
+# Seconds a code stays valid while nobody has replied to it
+TTL_SECS = "300"
+# Seconds the two peers have to finish once the reply is there
+REPLY_TTL_SECS = "120"
+# Seconds an ended slot is remembered, to tell a client why it is gone
+REMEMBER_SECS = "600"
+# Longest a request waits for a message, at most 25. A waiting request keeps the
+# Durable Object of its slot running, so a smaller number costs less.
+MAX_WAIT_SECS = "25"
+
+# Limits per client address and minute. Each has a counter of its own, so looking at
+# slots never uses up what a client needs to reply. Remove one to switch it off.
+[[ratelimits]]
+name = "CREATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "REPLY_LIMIT"
+namespace_id = "1002"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "LOOK_LIMIT"
+namespace_id = "1003"
+simple = { limit = 120, period = 60 }
+
+# For the tests in test.sh: no limits, so one address can make thousands of requests.
+[env.test]
+name = "quic-send-rendezvous-test"
+
+[[env.test.durable_objects.bindings]]
+name = "SLOT"
+class_name = "Slot"
+
+[[env.test.migrations]]
+tag = "v1"
+new_sqlite_classes = ["Slot"]
+
+[env.test.vars]
+TTL_SECS = "300"
+REPLY_TTL_SECS = "120"
+REMEMBER_SECS = "600"
+MAX_WAIT_SECS = "25"
