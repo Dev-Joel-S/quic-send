@@ -25,6 +25,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs
 # prebuilt-nasm: no assembler needed to build on Windows
 aws-lc-rs = { version = "1.19", features = ["prebuilt-nasm"] }
 pake-cpace = "0.1.7"
+libcrux-ml-kem = { version = "0.0.11", default-features = false, features = ["mlkem768"] }
 zeroize = "1.9"
 unicode-normalization = "0.1.26"
 # The same HTTP client iroh uses, TLS through the provider of the endpoint

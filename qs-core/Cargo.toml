@@ -20,6 +20,7 @@ noq = { workspace = true }
 rustls = { workspace = true }
 aws-lc-rs = { workspace = true }
 pake-cpace = { workspace = true }
+libcrux-ml-kem = { workspace = true }
 zeroize = { workspace = true }
 unicode-normalization = { workspace = true }
 reqwest = { workspace = true }

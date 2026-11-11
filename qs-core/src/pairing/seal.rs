@@ -7,6 +7,11 @@
 //!       secret and a hash of the transcript ([SessionKeys::derive]). An attacker has to
 //!       break both the PAKE and the KEM, a recorded pairing stays sealed if only the
 //!       classical one falls later.
+//! DONE: ML-KEM-768 comes from libcrux (`libcrux-ml-kem`), the formally verified
+//!       implementation. A public key from the other side is validated before use, as
+//!       FIPS 203 asks. The random bytes come from aws-lc-rs.
+//! TODO: libcrux does not wipe its key types. The private key and the secrets are wiped
+//!       here as far as that is possible from outside, copies inside the library are not.
 //! DONE: sealing and opening use ChaCha20-Poly1305 from aws-lc-rs, the provider that also
 //!       does the QUIC handshake. Every message has a fresh random nonce, each direction
 //!       has its own key, and the transcript is the associated data, so a message cannot
@@ -19,9 +24,10 @@
 //!       direction, KEM round trip and a foreign KEM ciphertext.
 
 use super::pake::{SharedKey, Side};
-use aws_lc_rs::{aead, digest, hkdf, hmac, kem};
+use aws_lc_rs::{aead, digest, hkdf, hmac};
+use libcrux_ml_kem::mlkem768;
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Salt of the key derivation, also the version of the key schedule
 const SALT: &[u8] = b"quic-send pairing v1";
@@ -41,22 +47,24 @@ pub enum SealError {
 /// The secret of a KEM exchange
 pub struct KemSecret(Zeroizing<Vec<u8>>);
 
+/// Random bytes from the system, wiped when dropped
+fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>, SealError> {
+    let mut bytes = Zeroizing::new([0u8; N]);
+    aws_lc_rs::rand::fill(bytes.as_mut_slice()).map_err(|_| SealError::Crypto)?;
+    Ok(bytes)
+}
+
 /// The private half of a KEM key pair, made for one pairing
 pub struct KemKey {
-    key: kem::DecapsulationKey,
+    key: mlkem768::MlKem768PrivateKey,
 }
 
 impl KemKey {
     /// A fresh key pair. Returns the private half and the public key to send.
     pub fn generate() -> Result<(Self, Vec<u8>), SealError> {
-        let key =
-            kem::DecapsulationKey::generate(&kem::ML_KEM_768).map_err(|_| SealError::Crypto)?;
-        let public = key
-            .encapsulation_key()
-            .and_then(|public| public.key_bytes())
-            .map_err(|_| SealError::Crypto)?;
+        let (key, public) = mlkem768::generate_key_pair(*random()?).into_parts();
 
-        Ok((Self { key }, public.as_ref().to_vec()))
+        Ok((Self { key }, public.as_slice().to_vec()))
     }
 
     /// The secret the other side put into `ciphertext`.
@@ -64,23 +72,38 @@ impl KemKey {
     /// A ciphertext that was made for another key does not fail here. It gives a
     /// secret nobody else has, so the keys derived from it open nothing.
     pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<KemSecret, SealError> {
-        self.key
-            .decapsulate(ciphertext.into())
-            .map(|secret| KemSecret(Zeroizing::new(secret.as_ref().to_vec())))
-            .map_err(|_| SealError::Crypto)
+        let ciphertext =
+            mlkem768::MlKem768Ciphertext::try_from(ciphertext).map_err(|_| SealError::Crypto)?;
+        let mut secret = mlkem768::decapsulate(&self.key, &ciphertext);
+        let wiped = KemSecret(Zeroizing::new(secret.to_vec()));
+        secret.zeroize();
+
+        Ok(wiped)
+    }
+}
+
+impl Drop for KemKey {
+    fn drop(&mut self) {
+        // The library's key type is not wiped by itself
+        let mut bytes: [u8; mlkem768::MlKem768PrivateKey::len()] =
+            std::mem::take(&mut self.key).into();
+        bytes.zeroize();
     }
 }
 
 /// Make a secret for the holder of `public`. Returns the ciphertext to send and the secret.
 pub fn encapsulate(public: &[u8]) -> Result<(Vec<u8>, KemSecret), SealError> {
-    let key =
-        kem::EncapsulationKey::new(&kem::ML_KEM_768, public).map_err(|_| SealError::Crypto)?;
-    let (ciphertext, secret) = key.encapsulate().map_err(|_| SealError::Crypto)?;
+    let public = mlkem768::MlKem768PublicKey::try_from(public).map_err(|_| SealError::Crypto)?;
+    // The check FIPS 203 asks for before a key from outside is used
+    if !mlkem768::validate_public_key(&public) {
+        return Err(SealError::Crypto);
+    }
 
-    Ok((
-        ciphertext.as_ref().to_vec(),
-        KemSecret(Zeroizing::new(secret.as_ref().to_vec())),
-    ))
+    let (ciphertext, mut secret) = mlkem768::encapsulate(&public, *random()?);
+    let wiped = KemSecret(Zeroizing::new(secret.to_vec()));
+    secret.zeroize();
+
+    Ok((ciphertext.as_slice().to_vec(), wiped))
 }
 
 /// A hash over everything both sides have to agree on.
@@ -288,6 +311,29 @@ mod tests {
         assert_eq!(encapsulate(b"too short").err(), Some(SealError::Crypto));
         let (key, _) = KemKey::generate().unwrap();
         assert!(key.decapsulate(b"too short").is_err());
+
+        // The right length, but numbers that are out of range for ML-KEM
+        assert_eq!(encapsulate(&[0xff; 1184]).err(), Some(SealError::Crypto));
+    }
+
+    /// The KEM is the standard one: a second, independent implementation agrees with it
+    #[test]
+    fn kem_matches_another_implementation() {
+        use aws_lc_rs::kem;
+
+        // Their key, our ciphertext
+        let theirs = kem::DecapsulationKey::generate(&kem::ML_KEM_768).unwrap();
+        let public = theirs.encapsulation_key().unwrap().key_bytes().unwrap();
+        let (ciphertext, secret) = encapsulate(public.as_ref()).unwrap();
+        let their_secret = theirs.decapsulate(ciphertext.as_slice().into()).unwrap();
+        assert_eq!(their_secret.as_ref(), secret.0.as_slice());
+
+        // Our key, their ciphertext
+        let (ours, public) = KemKey::generate().unwrap();
+        let public = kem::EncapsulationKey::new(&kem::ML_KEM_768, &public).unwrap();
+        let (ciphertext, their_secret) = public.encapsulate().unwrap();
+        let secret = ours.decapsulate(ciphertext.as_ref()).unwrap();
+        assert_eq!(their_secret.as_ref(), secret.0.as_slice());
     }
 
     #[test]
