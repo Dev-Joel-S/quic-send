@@ -76,10 +76,11 @@ done
 [ "$(status -X POST -H 'content-type: application/json' -d "$hello" "$base")" = 429 ] ||
   fail "the 31st create in a minute was not refused"
 
-# 30 replies per minute, also when they lead nowhere
+# 30 replies per minute, also when they lead nowhere. "zz" is no nameplate, so this
+# never meets one of the slots from above.
 for i in $(seq 1 30); do
-  code=$(status -X PUT -H 'content-type: application/json' -d "$hello" "$base/ZZ/reply")
-  [ "$code" = 404 ] || [ "$code" = 409 ] || [ "$code" = 410 ] || fail "reply $i gave $code"
+  code=$(status -X PUT -H 'content-type: application/json' -d "$hello" "$base/zz/reply")
+  [ "$code" = 404 ] || fail "reply $i gave $code"
 done
 [ "$(status -X PUT -H 'content-type: application/json' -d "$hello" "$base/$nameplate/reply")" = 429 ] ||
   fail "the 31st reply in a minute was not refused"
