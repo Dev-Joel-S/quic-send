@@ -43,6 +43,15 @@ Prebuilt downloads are on the [releases page](https://github.com/dev-joel-s/quic
 
 On Arch Linux, download the `PKGBUILD` that is attached to the release and run `makepkg -si` next to it. It builds from the source archive of that release and has its checksum.
 
+On NixOS, or anywhere with Nix, the repo is a flake with `qsend` and `qs-rendezvous` in one package (x86_64-linux):
+
+```
+nix run github:dev-joel-s/quic-send -- send <file/folder>
+nix profile install github:dev-joel-s/quic-send
+```
+
+In a NixOS configuration, add `inputs.quic-send.url = "github:dev-joel-s/quic-send";` and put `inputs.quic-send.packages.${pkgs.system}.default` into `environment.systemPackages`. `nix develop` gives a shell with the Rust toolchain for working on the code. The package links the `aws-lc` of nixpkgs instead of the copy inside the Rust crate, and its build runs the tests with it.
+
 From source, with a Rust toolchain:
 
 ```bash

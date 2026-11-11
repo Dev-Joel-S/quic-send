@@ -90,3 +90,21 @@ jobs:
       - name: Run the server tests against the Worker
         working-directory: rendezvous-worker
         run: ./test.sh
+
+  nix:
+    name: Nix flake
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+
+      # Builds the package, which runs the tests of the workspace inside the Nix sandbox
+      - name: Check the flake
+        run: nix flake check -L
+
+      - name: Run what was built
+        run: |
+          nix run . -- --version
+          nix develop -c cargo --version
