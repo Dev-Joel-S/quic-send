@@ -383,8 +383,13 @@ impl FilesToSkip {
                     files: offered_files,
                 },
             ) => {
+                // Every entry at most once, or the skipped bytes would add up to more
+                // than the directory has
+                let mut names = std::collections::HashSet::new();
+
                 name == offered_name
                     && files.len() <= offered_files.len()
+                    && files.iter().all(|skip| names.insert(skip.name()))
                     && files
                         .iter()
                         .all(|skip| offered_files.iter().any(|offered| skip.applies_to(offered)))
@@ -576,6 +581,8 @@ mod tests {
         assert!(!dir("root", vec![skip("zzz", 1)]).applies_to(&offered));
         assert!(!dir("root", vec![skip("sub", 1)]).applies_to(&offered));
         assert!(!dir("root", vec![skip("a", 11)]).applies_to(&offered));
+        // The same entry twice
+        assert!(!dir("root", vec![skip("a", 10), skip("a", 10)]).applies_to(&offered));
         assert!(!skip("root", 0).applies_to(&offered));
     }
 
