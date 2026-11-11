@@ -187,7 +187,7 @@ pub enum ReceiveError {
     Write(#[from] iroh::endpoint::WriteError),
     #[error("read error {0}")]
     Read(#[from] iroh::endpoint::ReadError),
-    #[error("version mismatch, expected: {0}, got: {1}")]
+    #[error("version mismatch, expected: {0:?}, got: {1:?}")]
     WrongVersion(String, String),
     #[error("unexpected data packet: {0:?}")]
     UnexpectedDataPacket(SenderToReceiver),

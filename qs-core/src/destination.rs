@@ -44,6 +44,26 @@ const WINDOWS_RESERVED: &[&str] = &[
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
+/// `text` in a form that is safe to print to a terminal.
+///
+/// Whatever the other side sends is under its control, file names included. Control
+/// characters (escape sequences that move the cursor or erase a line) and the characters
+/// that change the reading direction are replaced, so a name cannot make the list of
+/// offered files show something else than what is offered.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            c if c.is_control() => '\u{fffd}',
+            '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => '\u{fffd}',
+            c => c,
+        })
+        .collect()
+}
+
 /// The local name for a name offered by the sender.
 ///
 /// Names that could escape the destination directory are rejected. On Windows,
@@ -60,15 +80,21 @@ fn local_name_for(name: &str, windows: bool) -> Result<String, NameError> {
         return Err(NameError::Unsafe(name.to_string()));
     }
 
+    // Control characters are replaced on every system. In a file name they are of no
+    // use, and printed to a terminal they could rewrite what the user sees.
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect();
+
     if !windows {
-        return Ok(name.to_string());
+        return Ok(name);
     }
 
     let mut out: String = name
         .chars()
         .map(|c| match c {
             '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
-            c if (c as u32) < 0x20 => '_',
             c => c,
         })
         .collect();
@@ -668,5 +694,34 @@ mod tests {
         );
 
         assert_eq!(local_progress(&out.path().join("nope"), &offer), None);
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_file_system_or_the_terminal() {
+        // Erase the line and write another name over it
+        let name = "invoice.pdf\u{1b}[2K\rholiday.jpg";
+        for windows in [false, true] {
+            let local = local_name_for(name, windows).unwrap();
+            assert!(!local.chars().any(char::is_control), "{local:?}");
+            assert_eq!(local, "invoice.pdf_[2K_holiday.jpg");
+        }
+
+        let shown = printable(name);
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(shown.contains("invoice.pdf") && shown.contains("holiday.jpg"));
+
+        // Reading direction: "exe.txt" shown from the right would look like "txt.exe"
+        assert_eq!(printable("a\u{202e}txt.exe"), "a\u{fffd}txt.exe");
+        // Ordinary names stay as they are
+        for plain in ["Übung 1.txt", "файл.tar.gz", "日本語 (2).pdf", "a_b-c.d"] {
+            assert_eq!(printable(plain), plain);
+            assert_eq!(local_name_for(plain, false).unwrap(), plain);
+        }
+    }
+
+    #[test]
+    fn names_that_only_differ_in_control_characters_clash() {
+        let offered = [file("a\tb"), file("a\nb")];
+        assert!(validate_names(&offered, false, true).is_err());
     }
 }

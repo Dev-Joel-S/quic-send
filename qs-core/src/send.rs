@@ -134,7 +134,7 @@ pub enum SendError {
     Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("read error: {0}")]
     Read(#[from] iroh::endpoint::ReadError),
-    #[error("wrong version, the receiver expected: {0}, but got: {1}")]
+    #[error("wrong version, the receiver expected: {0:?}, but got: {1:?}")]
     WrongVersion(String, String),
     #[error("unexpected data packet: {0:?}")]
     UnexpectedDataPacket(ReceiverToSender),

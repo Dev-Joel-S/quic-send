@@ -5,7 +5,7 @@ use dialoguer::theme::ColorfulTheme;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use qs_core::{
     common::{ConnectionPath, FilesAvailable},
-    destination::{Destination, Placement},
+    destination::{printable, Destination, Placement},
 };
 
 /// Put `text` on the clipboard. Returns the clipboard handle on success.
@@ -36,7 +36,7 @@ pub fn print_destinations(offered: &[FilesAvailable], destinations: &[Destinatio
             Placement::Overwrite => "overwriting".yellow(),
         };
 
-        println!(" - {} ({})", name.blue(), note);
+        println!(" - {} ({})", printable(&name).blue(), note);
     }
 }
 
@@ -56,7 +56,8 @@ pub fn accept_files(files_offered: &[FilesAvailable]) -> bool {
     for file in files_offered {
         let size = file.size();
         let size_human_bytes = HumanBytes(size).to_string();
-        let name = file.name();
+        // The name is the sender's, it must not be able to rewrite this list
+        let name = printable(file.name());
 
         println!(
             " - {:<width$} {:>10}",
@@ -126,7 +127,7 @@ impl CliProgressBars {
         let mut bars = Vec::new();
         for (name, progress, size) in callback_data {
             let pb = mp.add(ProgressBar::new(*size));
-            pb.set_prefix(format!("{:<width$}", name, width = longest_name));
+            pb.set_prefix(format!("{:<width$}", printable(name), width = longest_name));
             pb.set_style(style.clone());
             pb.set_position(*progress);
             pb.reset_eta();
