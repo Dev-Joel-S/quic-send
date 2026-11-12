@@ -215,10 +215,11 @@ fn read_identity(path: &Path) -> Result<Option<Zeroizing<String>>, PeerError> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             // A file from before the access rights were set, or one that was copied
-            // around: tighten it. If that fails the key is still usable.
+            // around: tighten it. If that fails the key is still usable. Telling the
+            // user is up to the frontend, see [identity_is_exposed].
             if !private_file::is_private(path).unwrap_or(true) {
                 if let Err(e) = private_file::restrict(path) {
-                    tracing::debug!("could not restrict access to the identity file: {e}");
+                    tracing::warn!("could not restrict access to the identity file: {e}");
                 }
             }
             Ok(Some(Zeroizing::new(text)))
@@ -237,7 +238,9 @@ fn write_identity(
     let text = match passphrase {
         Some(passphrase) => {
             let sealed = SealedIdentity::seal(secret, passphrase)?;
-            Zeroizing::new(serde_json::to_string_pretty(&sealed).unwrap_or_default())
+            let text = serde_json::to_string_pretty(&sealed)
+                .map_err(|e| io_error(path)(io::Error::other(e)))?;
+            Zeroizing::new(text)
         }
         None => {
             let bytes = Zeroizing::new(secret.to_bytes());
@@ -250,6 +253,33 @@ fn write_identity(
     };
 
     private_file::write(path, text.as_bytes()).map_err(io_error(path))
+}
+
+/// Whether the identity file in `dir` can be read by others than the user. If it can,
+/// the key may already have been copied. Ask this before the identity is loaded, loading
+/// takes the extra access away.
+pub fn identity_is_exposed(dir: &Path) -> bool {
+    let path = dir.join(IDENTITY_FILE);
+    path.exists() && !private_file::is_private(&path).unwrap_or(true)
+}
+
+/// Make up a new identity in `dir`, sealed with `passphrase` if there is one.
+///
+/// With a passphrase the key is only ever written sealed. Sealing an identity that
+/// already exists ([set_identity_passphrase]) cannot give that: the unsealed file was on
+/// the disk before, and replacing a file does not erase what it held.
+/// Fails if `dir` already has an identity.
+pub fn create_identity(dir: &Path, passphrase: Option<&str>) -> Result<SecretKey, PeerError> {
+    let path = dir.join(IDENTITY_FILE);
+    if path.exists() {
+        return Err(io_error(&path)(io::Error::from(
+            io::ErrorKind::AlreadyExists,
+        )));
+    }
+
+    let key = SecretKey::generate();
+    write_identity(&path, &key, passphrase)?;
+    Ok(key)
 }
 
 /// Whether `dir` has an identity, and whether a passphrase is needed for it
@@ -536,6 +566,35 @@ mod tests {
         assert_eq!(identity_state(dir.path()).unwrap(), IdentityState::Plain);
         let again = load_or_create_identity(dir.path(), None).unwrap();
         assert_eq!(again.public(), key.public());
+    }
+
+    #[test]
+    fn new_identity_with_a_passphrase_is_never_written_unsealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(IDENTITY_FILE);
+
+        let key = create_identity(dir.path(), Some("correct horse")).unwrap();
+        assert_eq!(identity_state(dir.path()).unwrap(), IdentityState::Sealed);
+
+        // Nothing in the directory holds the key as it is, in any of its spellings
+        let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let content = std::fs::read(entry.unwrap().path()).unwrap();
+            let text = String::from_utf8_lossy(&content);
+            assert!(!text.contains(&hex));
+            assert!(!content
+                .windows(32)
+                .any(|window| window == key.to_bytes().as_slice()));
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(!identity_is_exposed(dir.path()));
+
+        let again = load_or_create_identity(dir.path(), Some("correct horse")).unwrap();
+        assert_eq!(again.public(), key.public());
+
+        // An identity that is there is not replaced
+        assert!(create_identity(dir.path(), None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap().first(), Some(&b'{'));
     }
 
     #[test]

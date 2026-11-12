@@ -46,7 +46,7 @@ In [`wrangler.toml`](wrangler.toml):
 | `REPLY_TTL_SECS` | 120 | seconds the two peers have to finish once the reply is there |
 | `REMEMBER_SECS` | 600 | seconds an ended slot is remembered, to tell a client why it is gone |
 | `MAX_WAIT_SECS` | 25 | longest a request waits for a message |
-| `CREATE_LIMIT` | 30 per minute | slots one address may open |
+| `CREATE_LIMIT` | 5 per minute | slots one address may open, which is 25 at once with the default `TTL_SECS` |
 | `REPLY_LIMIT` | 30 per minute | replies one address may send. A reply is a guess at a code |
 | `LOOK_LIMIT` | 120 per minute | looks at a slot one address may take. They cost the slot nothing |
 

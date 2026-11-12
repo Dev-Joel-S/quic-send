@@ -8,8 +8,8 @@ use crate::config::{config_dir, RelaySetting, Settings};
 use colored::Colorize;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
 use qs_core::peers::{
-    identity_state, load_or_create_identity, set_identity_passphrase, IdentityState, KnownPeer,
-    PeerError, PeerStore,
+    create_identity, identity_is_exposed, identity_state, load_or_create_identity,
+    set_identity_passphrase, IdentityState, KnownPeer, PeerError, PeerStore,
 };
 use std::{
     io::IsTerminal,
@@ -33,6 +33,16 @@ const PASSPHRASE_ATTEMPTS: usize = 3;
 
 /// The stable identity of this device. Asks for the passphrase if it is sealed with one.
 pub fn identity(dir: &Path) -> Result<SecretKey, Failure> {
+    if identity_is_exposed(dir) {
+        eprintln!(
+            "{} the identity file in {} could be read by other users of this computer. \
+             That is closed now, but the key may have been copied before. To be safe, \
+             remove the file and save your peers again.",
+            "warning:".yellow().bold(),
+            dir.display()
+        );
+    }
+
     match identity_state(dir)? {
         IdentityState::Plain => Ok(load_or_create_identity(dir, None)?),
         IdentityState::Missing => {
@@ -62,8 +72,27 @@ pub fn identity(dir: &Path) -> Result<SecretKey, Failure> {
 
 /// Set, change or remove the passphrase the identity is sealed with
 pub fn passphrase(dir: &Path) -> Result<(), Failure> {
+    // No identity yet: make one that is sealed from the start, so the key never touches
+    // the disk without the passphrase
+    if identity_state(dir)? == IdentityState::Missing {
+        let new = crate::password::ask_new_passphrase()?;
+        create_identity(dir, (!new.is_empty()).then_some(new.as_str()))?;
+        println!(
+            "This device now has an identity that stays, kept in {}.",
+            dir.display()
+        );
+        if !new.is_empty() {
+            println!(
+                "It is sealed with the passphrase and was never stored without it. You are \
+                 asked for it whenever a saved peer is used. There is no way to recover it."
+            );
+        }
+        return Ok(());
+    }
+
     // Whoever changes how the key is kept has to be able to use it, so this asks for the
     // current passphrase first if there is one
+    let was_plain = identity_state(dir)? == IdentityState::Plain;
     let key = identity(dir)?;
 
     let new = crate::password::ask_new_passphrase()?;
@@ -76,6 +105,15 @@ pub fn passphrase(dir: &Path) -> Result<(), Failure> {
             "The identity is sealed with the passphrase. You are asked for it whenever a \
              saved peer is used. There is no way to recover it."
         );
+        if was_plain {
+            println!(
+                "{} this key was stored without a passphrase until now, and replacing a file \
+                 does not erase what it held. Somebody who reads the disk itself may still \
+                 find the old copy. For a key that was never stored unsealed, remove the \
+                 identity file, run this command again and save your peers again.",
+                "note:".yellow().bold()
+            );
+        }
     }
     Ok(())
 }

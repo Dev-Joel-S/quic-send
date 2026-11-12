@@ -269,9 +269,14 @@ export default {
       return answer(await slot().look());
     }
 
+    // The requests below need a token. Without one the answer is the same whatever
+    // the slot is, like the Rust server gives it.
+    const token = bearer(request);
+
     if (what === undefined && method === "DELETE") {
+      if (token === null) return error("forbidden");
       if (!known) return empty();
-      return answer(await slot().close(bearer(request)));
+      return answer(await slot().close(token));
     }
 
     if (what === "reply" && method === "PUT") {
@@ -283,20 +288,23 @@ export default {
     }
 
     if (what === "reply" && method === "GET") {
+      if (token === null) return error("forbidden");
       if (!known) return error("unknown_slot");
-      return answer(await slot().waitFor("reply", bearer(request), waitSeconds(url)));
+      return answer(await slot().waitFor("reply", token, waitSeconds(url)));
     }
 
     if (what === "address" && method === "PUT") {
       const { message, error: problem } = await readMessage(request);
       if (problem) return error(problem);
+      if (token === null) return error("forbidden");
       if (!known) return error("unknown_slot");
-      return answer(await slot().putAddress(bearer(request), message));
+      return answer(await slot().putAddress(token, message));
     }
 
     if (what === "address" && method === "GET") {
+      if (token === null) return error("forbidden");
       if (!known) return error("unknown_slot");
-      return answer(await slot().waitFor("address", bearer(request), waitSeconds(url)));
+      return answer(await slot().waitFor("address", token, waitSeconds(url)));
     }
 
     return error("unknown_slot");

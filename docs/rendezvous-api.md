@@ -134,6 +134,9 @@ The address is delivered once. With that answer the slot has ended as `used`.
 `204 No Content`. The slot has ended as `closed`. Deleting a slot that does not exist any
 more is `204` as well, with any token.
 
+A request that needs a token and comes without one is `403 forbidden`, whatever the slot
+is: gone, unknown, or a name that is no nameplate.
+
 ## Waiting
 
 `wait` is the number of seconds the server may hold the request until the message is there.

@@ -88,7 +88,7 @@ on the other peer, run the following command:
 qsend receive K7X4-M2QP
 ```
 
-The receiver needs the same rendezvous server. Several can be listed (`rendezvous = [...]` in the config file, or `--rendezvous` more than once): the sender uses the first one that answers, the receiver looks for the code on them in the same order. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
+The receiver needs the same rendezvous server. Several can be listed (`rendezvous = [...]` in the config file, or `--rendezvous` more than once): the sender uses the first one that answers, the receiver looks for the code on them in the same order. Keep the list the same on both sides: if the two end up on different servers, the receiver can meet somebody else's code that happens to have the same first two characters there, and both pairings fail. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
 
 Both sides print a short fingerprint of their own id and of the peer's (`This device`, `Sender`, `Receiver`). Compare them if you want to be sure who is on the other end.
 
@@ -172,7 +172,7 @@ laptop$  qsend send --to homelab <file/folder>
 
 A saved peer is recognized by its public key, no server takes part in that. For this, both machines use a key that stays the same, kept in `identity.key` in the config directory. Every other transfer uses a fresh key, so nothing links one transfer to the next. A key that stays can be recognized by the relay, which is the price of not needing a code.
 
-Only your user can read `identity.key`: mode 0600 on Linux, and on Windows an access list of its own with your account as the only entry, nothing inherited from the folder. That does not stop an administrator, a backup or somebody who reads the disk from another system. `qsend peers passphrase` seals the key with a passphrase as well (PBKDF2-HMAC-SHA256 with 600,000 rounds and ChaCha20-Poly1305, both from aws-lc-rs). You are then asked for it whenever a saved peer is used. An empty passphrase removes it again, and a forgotten one cannot be recovered: remove the file and save your peers again.
+Only your user can read `identity.key`: mode 0600 on Linux, and on Windows an access list of its own with your account as the only entry, nothing inherited from the folder. That does not stop an administrator, a backup or somebody who reads the disk from another system. `qsend peers passphrase` seals the key with a passphrase as well (PBKDF2-HMAC-SHA256 with 600,000 rounds and ChaCha20-Poly1305, both from aws-lc-rs). You are then asked for it whenever a saved peer is used. An empty passphrase removes it again, and a forgotten one cannot be recovered: remove the file and save your peers again. Run `qsend peers passphrase` before the first `--save-peer` if you want a key that was never on the disk without the passphrase. Sealing a key that was already stored cannot undo that, the old copy may still be found by somebody who reads the disk itself.
 
 The peer is dialed at the address it had when it was saved (its relay and its IP addresses). If it moved, pair once more with `--save-peer`. Without a relay, give the receiving machine a fixed `--port`.
 

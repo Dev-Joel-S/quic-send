@@ -1,0 +1,5 @@
+# Words the spelling check in CI takes for mistakes
+
+[default.extend-words]
+# The start of "caf\u{e9}", in tests that write the accent as an escape
+caf = "caf"

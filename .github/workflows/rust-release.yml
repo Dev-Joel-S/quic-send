@@ -118,7 +118,8 @@ jobs:
     name: Arch Linux (build the PKGBUILD)
     needs: [plan, source]
     runs-on: ubuntu-latest
-    # Only used to try the PKGBUILD, nothing built in here is published
+    # Only used to try the PKGBUILD. Nothing from this job is published: the release
+    # job takes the artifacts of the other jobs by name. The image is a moving tag.
     container: archlinux:base-devel
 
     steps:
@@ -221,10 +222,20 @@ jobs:
       contents: write
 
     steps:
+      # Only the three artifacts the build jobs made, each by its name. Anything else
+      # that may have been uploaded during this run is not published.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          name: source
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows
+          path: dist
 
       - name: Checksums
         run: |
@@ -271,6 +282,11 @@ jobs:
           sum=$(sha256sum "quic-send-$VERSION.tar.gz" | cut -d ' ' -f 1)
           grep -q "^sha256sums=('$sum')$" PKGBUILD
           grep -q "^_version=$VERSION$" PKGBUILD
+
+          # And the address in the PKGBUILD itself leads to that very file
+          address=$(bash -c 'source ./PKGBUILD && printf %s "${source[0]#*::}"')
+          curl -fsSL --retry 5 --retry-delay 3 -o from-pkgbuild.tar.gz "$address"
+          echo "$sum  from-pkgbuild.tar.gz" | sha256sum --check
 
           tar xzf "qsend-$VERSION-x86_64-linux.tar.gz"
           "qsend-$VERSION-x86_64-linux/qsend" --version

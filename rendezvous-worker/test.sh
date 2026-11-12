@@ -68,13 +68,13 @@ nameplate=$(curl -s --noproxy '*' -X POST -H 'content-type: application/json' -d
   sed -n 's/.*"nameplate":"\([^"]*\)".*/\1/p')
 [ -n "$nameplate" ] || fail "could not create a slot"
 
-# 30 slots per minute, the first one is used up above
-for i in $(seq 2 30); do
+# 5 slots per minute, the first one is used up above
+for i in $(seq 2 5); do
   [ "$(status -X POST -H 'content-type: application/json' -d "$hello" "$base")" = 201 ] ||
     fail "create $i was refused"
 done
 [ "$(status -X POST -H 'content-type: application/json' -d "$hello" "$base")" = 429 ] ||
-  fail "the 31st create in a minute was not refused"
+  fail "the 6th create in a minute was not refused"
 
 # 30 replies per minute, also when they lead nowhere. "zz" is no nameplate, so this
 # never meets one of the slots from above.

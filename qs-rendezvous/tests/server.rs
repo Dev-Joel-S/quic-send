@@ -438,6 +438,37 @@ async fn tokens_are_required_and_bound_to_a_role() {
 }
 
 #[tokio::test]
+async fn without_a_token_the_answer_never_depends_on_the_slot() {
+    let base = server!(Server::Open);
+    let client = client();
+
+    // A slot that is gone, a nameplate nobody has, and a name that is no nameplate
+    let (gone, sender) = created(&client, &base).await;
+    delete(&client, &base, &gone, &sender).await;
+
+    for nameplate in [gone.as_str(), "zz", "K7X4"] {
+        let reply_url = format!("{base}{}", reply_path(nameplate));
+        let address_url = format!("{base}{}", address_path(nameplate));
+        let slot_url = format!("{base}{}", slot_path(nameplate));
+        let body = Some(json!({ "message": ADDRESS }));
+
+        for answer in [
+            call(&client, Method::GET, reply_url, None, None).await,
+            call(&client, Method::GET, address_url.clone(), None, None).await,
+            call(&client, Method::PUT, address_url, None, body).await,
+            call(&client, Method::DELETE, slot_url, None, None).await,
+        ] {
+            assert_eq!(answer.status, StatusCode::FORBIDDEN, "{nameplate}");
+            assert_eq!(answer.error(), "forbidden", "{nameplate}");
+        }
+
+        // With any token, deleting what is not there is fine
+        let deleted = delete(&client, &base, nameplate, "whatever").await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{nameplate}");
+    }
+}
+
+#[tokio::test]
 async fn giving_up_closes_the_slot_for_the_other_side() {
     let base = server!(Server::Open);
     let client = client();

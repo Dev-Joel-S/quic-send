@@ -31,10 +31,12 @@ MAX_WAIT_SECS = "25"
 
 # Limits per client address and minute. Each has a counter of its own, so looking at
 # slots never uses up what a client needs to reply. Remove one to switch it off.
+# Slots are what can run out: there are 1024, and one lives for TTL_SECS. With 5 per
+# minute one address holds 25 at most.
 [[ratelimits]]
 name = "CREATE_LIMIT"
 namespace_id = "1001"
-simple = { limit = 30, period = 60 }
+simple = { limit = 5, period = 60 }
 
 [[ratelimits]]
 name = "REPLY_LIMIT"
