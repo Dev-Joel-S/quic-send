@@ -68,22 +68,33 @@ nameplate=$(curl -s --noproxy '*' -X POST -H 'content-type: application/json' -d
   sed -n 's/.*"nameplate":"\([^"]*\)".*/\1/p')
 [ -n "$nameplate" ] || fail "could not create a slot"
 
-# 5 slots per minute, the first one is used up above
-for i in $(seq 2 5); do
-  [ "$(status -X POST -H 'content-type: application/json' -d "$hello" "$base")" = 201 ] ||
-    fail "create $i was refused"
+# The limits count per minute on the clock, so a count can start again in the middle of
+# this. Enough requests for two minutes' worth always fill one of them.
+
+# 5 slots per minute
+refused=0
+for i in $(seq 1 11); do
+  code=$(status -X POST -H 'content-type: application/json' -d "$hello" "$base")
+  case "$code" in
+    201) ;;
+    429) refused=1 ;;
+    *) fail "create $i gave $code" ;;
+  esac
 done
-[ "$(status -X POST -H 'content-type: application/json' -d "$hello" "$base")" = 429 ] ||
-  fail "the 6th create in a minute was not refused"
+[ "$refused" = 1 ] || fail "creating slots was never refused"
 
 # 30 replies per minute, also when they lead nowhere. "zz" is no nameplate, so this
-# never meets one of the slots from above.
-for i in $(seq 1 30); do
+# never meets a slot.
+refused=0
+for i in $(seq 1 62); do
   code=$(status -X PUT -H 'content-type: application/json' -d "$hello" "$base/zz/reply")
-  [ "$code" = 404 ] || fail "reply $i gave $code"
+  case "$code" in
+    404) ;;
+    429) refused=1 ;;
+    *) fail "reply $i gave $code" ;;
+  esac
 done
-[ "$(status -X PUT -H 'content-type: application/json' -d "$hello" "$base/$nameplate/reply")" = 429 ] ||
-  fail "the 31st reply in a minute was not refused"
+[ "$refused" = 1 ] || fail "replying was never refused"
 
 # Looking is counted on its own: it still works, and the slot is still unused
 [ "$(status "$base/$nameplate")" = 200 ] || fail "looking was refused together with replying"
