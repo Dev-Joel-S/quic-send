@@ -3,9 +3,13 @@ name: Release
 # A tag `v<version>` builds and publishes a release. A tag with a "-" in it, like
 # `v1.2.0-rc1`, becomes a prerelease.
 #
-# To try the whole thing without leaving anything behind, start the workflow by hand and
-# give it a test tag such as `v0.0.1-test`: it is published as a prerelease, the uploaded
-# files are downloaded and checked, and then release and tag are removed again.
+# A prerelease can also be made without pushing a tag: start the workflow by hand and give
+# it the tag, such as `v1.2.0-alpha.1`. The release creates the tag at the commit the run
+# was started for.
+#
+# To try the whole thing without leaving anything behind, give it a tag that ends in
+# `-test`, such as `v0.0.1-test`: it is published as a prerelease, the uploaded files are
+# downloaded and checked, and then release and tag are removed again.
 # Started by hand without a tag, the workflow only builds.
 
 on:
@@ -14,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       test_tag:
-        description: "Tag for a test release, has to end in -test (v0.0.1-test). Empty: only build"
+        description: "Tag for a prerelease (v1.2.0-alpha.1). Ending in -test: removed again after the check. Empty: only build"
         required: false
         default: ""
 
@@ -51,8 +55,9 @@ jobs:
           if [ "$REF_TYPE" = tag ]; then
             tag=$REF_NAME
           elif [ -n "$TEST_TAG" ]; then
-            if ! printf '%s' "$TEST_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-test$'; then
-              echo "::error::a test tag looks like v0.0.1-test"
+            # Only prereleases this way. A full release is a tag somebody pushed.
+            if ! printf '%s' "$TEST_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z][0-9A-Za-z.]*$'; then
+              echo "::error::a prerelease tag looks like v1.2.0-alpha.1, a test tag like v0.0.1-test"
               exit 1
             fi
             tag=$TEST_TAG
@@ -243,8 +248,8 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
-      # For a tag that was pushed the tag exists. For a test tag the release creates it,
-      # at the commit this run was started for.
+      # For a tag that was pushed the tag exists. For a tag given by hand the release
+      # creates it, at the commit this run was started for.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
