@@ -1,14 +1,14 @@
 use std::path::Path;
 
-use async_compression::tokio::write::{GzipDecoder, GzipEncoder};
-use bincode::{Decode, Encode};
-use serde::{Deserialize, Serialize};
+use crate::limits::{LimitError, NestingGuard, MAX_PACKET_COMPRESSED, MAX_PACKET_SIZE};
+use async_compression::tokio::{bufread::GzipDecoder, write::GzipEncoder};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Tree structure that represents the files that
 /// are being sent/received
-#[derive(Debug, PartialEq, Clone, Encode, Decode, Hash)]
+#[derive(Debug, PartialEq, Clone, Hash)]
 pub enum FileSendRecvTree {
     File {
         name: String,
@@ -49,37 +49,103 @@ impl FileSendRecvTree {
 }
 
 /// Tree structure that represents the files that are available
-#[derive(Debug, PartialEq, Clone, Encode, Decode, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Hash, Serialize)]
 pub enum FilesAvailable {
     File {
         name: String,
         size: u64,
+        /// Modification time in seconds since the unix epoch, if known
+        mtime: Option<u64>,
     },
     Dir {
         name: String,
         files: Vec<FilesAvailable>,
     },
 }
-/// Get the available files
-pub fn get_files_available(path: &Path) -> std::io::Result<FilesAvailable> {
-    if path.is_file() {
-        Ok(FilesAvailable::File {
-            name: path.file_name().unwrap().to_str().unwrap().to_string(),
-            size: path.metadata()?.len(),
-        })
-    } else {
-        let mut files = Vec::new();
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let path = entry.path();
-            files.push(get_files_available(&path)?);
-        }
+/// What [FilesAvailable] looks like on the wire. Decoding goes through this type, so
+/// every nested level passes the depth check in the [Deserialize] impl below.
+#[derive(Deserialize)]
+#[serde(rename = "FilesAvailable")]
+enum FilesAvailableWire {
+    File {
+        name: String,
+        size: u64,
+        mtime: Option<u64>,
+    },
+    Dir {
+        name: String,
+        files: Vec<FilesAvailable>,
+    },
+}
 
-        Ok(FilesAvailable::Dir {
-            name: path.file_name().unwrap().to_str().unwrap().to_string(),
-            files,
+impl<'de> Deserialize<'de> for FilesAvailable {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _guard = NestingGuard::enter().map_err(serde::de::Error::custom)?;
+
+        Ok(match FilesAvailableWire::deserialize(deserializer)? {
+            FilesAvailableWire::File { name, size, mtime } => Self::File { name, size, mtime },
+            FilesAvailableWire::Dir { name, files } => Self::Dir { name, files },
         })
     }
+}
+
+/// Get the available files
+pub fn get_files_available(path: &Path) -> std::io::Result<FilesAvailable> {
+    let name = entry_name(path)?;
+
+    if path.is_file() {
+        let metadata = path.metadata()?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        Ok(FilesAvailable::File {
+            name,
+            size: metadata.len(),
+            mtime,
+        })
+    } else {
+        let mut entries = std::fs::read_dir(path)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        // Same order on every run, so a resumed transfer offers the same tree
+        entries.sort();
+
+        let mut files = Vec::new();
+        for entry in entries {
+            files.push(get_files_available(&entry)?);
+        }
+
+        Ok(FilesAvailable::Dir { name, files })
+    }
+}
+
+/// The name a path is offered under
+///
+/// Paths like `.` or `..` have no file name of their own, so they are resolved first.
+fn entry_name(path: &Path) -> std::io::Result<String> {
+    let name = match path.file_name() {
+        Some(name) => name.to_owned(),
+        None => path
+            .canonicalize()?
+            .file_name()
+            .map(|n| n.to_owned())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{} has no file name", path.display()),
+                )
+            })?,
+    };
+
+    name.into_string().map_err(|name| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file name is not valid UTF-8: {}", name.to_string_lossy()),
+        )
+    })
 }
 
 impl FilesAvailable {
@@ -102,7 +168,7 @@ impl FilesAvailable {
     /// Convert the tree to a [FileSendRecvTree]
     pub fn to_send_recv_tree(&self) -> FileSendRecvTree {
         match self {
-            FilesAvailable::File { name, size } => FileSendRecvTree::File {
+            FilesAvailable::File { name, size, .. } => FileSendRecvTree::File {
                 name: name.to_string(),
                 skip: 0,
                 size: *size,
@@ -120,7 +186,7 @@ impl FilesAvailable {
     pub fn remove_skipped(&self, to_skip: &FilesToSkip) -> Option<FileSendRecvTree> {
         match (self, to_skip) {
             (
-                FilesAvailable::File { name, size },
+                FilesAvailable::File { name, size, .. },
                 FilesToSkip::File {
                     name: skip_name,
                     skip,
@@ -197,6 +263,7 @@ impl FilesAvailable {
                 FilesAvailable::File {
                     name: local_name,
                     size: local_size,
+                    ..
                 },
             ) => {
                 if name == local_name {
@@ -257,7 +324,7 @@ impl FilesAvailable {
 }
 
 /// Tree structure that represents files that have been requested for skipping
-#[derive(Debug, PartialEq, Clone, Encode, Decode, Hash)]
+#[derive(Debug, PartialEq, Clone, Hash, Serialize)]
 pub enum FilesToSkip {
     File {
         name: String,
@@ -269,7 +336,68 @@ pub enum FilesToSkip {
     },
 }
 
+/// What [FilesToSkip] looks like on the wire, see [FilesAvailableWire]
+#[derive(Deserialize)]
+#[serde(rename = "FilesToSkip")]
+enum FilesToSkipWire {
+    File {
+        name: String,
+        skip: u64,
+    },
+    Dir {
+        name: String,
+        files: Vec<FilesToSkip>,
+    },
+}
+
+impl<'de> Deserialize<'de> for FilesToSkip {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _guard = NestingGuard::enter().map_err(serde::de::Error::custom)?;
+
+        Ok(match FilesToSkipWire::deserialize(deserializer)? {
+            FilesToSkipWire::File { name, skip } => Self::File { name, skip },
+            FilesToSkipWire::Dir { name, files } => Self::Dir { name, files },
+        })
+    }
+}
+
 impl FilesToSkip {
+    /// Whether this skip tree is a valid answer to `offered`.
+    ///
+    /// The receiver chooses it, so the sender must check it before using it: same root,
+    /// every entry exists in the offer with the same kind, nothing is skipped past its size.
+    pub fn applies_to(&self, offered: &FilesAvailable) -> bool {
+        match (self, offered) {
+            (
+                FilesToSkip::File { name, skip },
+                FilesAvailable::File {
+                    name: offered_name,
+                    size,
+                    ..
+                },
+            ) => name == offered_name && skip <= size,
+            (
+                FilesToSkip::Dir { name, files },
+                FilesAvailable::Dir {
+                    name: offered_name,
+                    files: offered_files,
+                },
+            ) => {
+                // Every entry at most once, or the skipped bytes would add up to more
+                // than the directory has
+                let mut names = std::collections::HashSet::new();
+
+                name == offered_name
+                    && files.len() <= offered_files.len()
+                    && files.iter().all(|skip| names.insert(skip.name()))
+                    && files
+                        .iter()
+                        .all(|skip| offered_files.iter().any(|offered| skip.applies_to(offered)))
+            }
+            _ => false,
+        }
+    }
+
     /// Name of the file or directory
     pub fn name(&self) -> &str {
         match self {
@@ -288,14 +416,37 @@ impl FilesToSkip {
     }
 }
 
-pub async fn send_packet<P: Encode + std::fmt::Debug>(
+/// How the connection to the other peer is currently routed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPath {
+    /// Straight to the other peer
+    Direct,
+    /// Through a relay server
+    Relay,
+    /// No path selected yet
+    Unknown,
+}
+
+/// The path currently used for data on `conn`
+pub fn connection_path(conn: &iroh::endpoint::Connection) -> ConnectionPath {
+    let paths = conn.paths();
+    let selected = paths.iter().find(|p| p.is_selected());
+
+    match selected {
+        Some(p) if p.is_ip() => ConnectionPath::Direct,
+        Some(p) if p.is_relay() => ConnectionPath::Relay,
+        _ => ConnectionPath::Unknown,
+    }
+}
+
+pub async fn send_packet<P: Serialize + std::fmt::Debug>(
     packet: P,
     conn: &iroh::endpoint::Connection,
 ) -> std::io::Result<()> {
     tracing::debug!("Sending packet: {:?}", packet);
     let mut send = conn.open_uni().await?;
 
-    let data = bincode::encode_to_vec(&packet, bincode::config::standard()).unwrap();
+    let data = postcard::to_stdvec(&packet).map_err(std::io::Error::other)?;
     let compressed = compress_gzip(&data).await?;
     send.write_all(&compressed).await?;
 
@@ -309,33 +460,35 @@ pub async fn send_packet<P: Encode + std::fmt::Debug>(
 pub enum PacketRecvError {
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("encode error: {0}")]
-    EncodeError(#[from] bincode::error::DecodeError),
+    #[error("decode error: {0}")]
+    Decode(#[from] postcard::Error),
     #[error("connection error: {0}")]
     Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("read error {0}")]
     Read(#[from] iroh::endpoint::ReadError),
+    #[error("{0}")]
+    Limit(#[from] LimitError),
 }
 
-pub async fn receive_packet<P: Decode<()> + std::fmt::Debug>(
+/// Receive one packet.
+///
+/// Both the compressed packet and what it decompresses to are bounded, see [crate::limits].
+pub async fn receive_packet<P: DeserializeOwned + std::fmt::Debug>(
     conn: &iroh::endpoint::Connection,
 ) -> Result<P, PacketRecvError> {
     let mut recv = conn.accept_uni().await?;
-    let mut buf = Vec::new();
 
-    loop {
-        let mut data = vec![0; 1024];
-        if let Some(n) = recv.read(&mut data).await? {
-            buf.extend_from_slice(&data[..n]);
-            continue;
+    let compressed = match recv.read_to_end(MAX_PACKET_COMPRESSED).await {
+        Ok(data) => data,
+        Err(iroh::endpoint::ReadToEndError::TooLong) => {
+            return Err(LimitError::PacketTooLarge(MAX_PACKET_COMPRESSED).into());
         }
+        Err(iroh::endpoint::ReadToEndError::Read(e)) => return Err(e.into()),
+    };
 
-        break;
-    }
+    let decompressed = decompress_gzip(&compressed, MAX_PACKET_SIZE).await?;
 
-    let decompressed = decompress_gzip(&buf).await?;
-
-    let packet = bincode::decode_from_slice(&decompressed, bincode::config::standard())?.0;
+    let packet = postcard::from_bytes(&decompressed)?;
 
     tracing::debug!("Received packet: {:?}", packet);
 
@@ -351,11 +504,16 @@ async fn compress_gzip(data: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-async fn decompress_gzip(data: &[u8]) -> std::io::Result<Vec<u8>> {
+/// Decompress `data`, failing if the result is larger than `limit` bytes
+async fn decompress_gzip(data: &[u8], limit: usize) -> Result<Vec<u8>, PacketRecvError> {
     let mut out = Vec::new();
-    let mut decoder = GzipDecoder::new(&mut out);
-    decoder.write_all(data).await?;
-    decoder.shutdown().await?;
+    let decoder = GzipDecoder::new(data);
+    // One byte more than allowed tells "exactly at the limit" and "too large" apart
+    decoder.take(limit as u64 + 1).read_to_end(&mut out).await?;
+
+    if out.len() > limit {
+        return Err(LimitError::PacketTooLarge(limit).into());
+    }
 
     Ok(out)
 }
@@ -369,10 +527,63 @@ mod tests {
     async fn test_compression() {
         let data = b"hellllllllllllllllllllllllo world";
         let compressed = compress_gzip(data).await.unwrap();
-        let decompressed = decompress_gzip(&compressed).await.unwrap();
+        let decompressed = decompress_gzip(&compressed, 1024).await.unwrap();
 
         assert!(compressed.len() < data.len());
         assert_eq!(data, &decompressed[..]);
+    }
+
+    #[tokio::test]
+    async fn decompression_is_bounded() {
+        // A megabyte of zeros compresses to about a kilobyte
+        let bomb = compress_gzip(&vec![0u8; 1024 * 1024]).await.unwrap();
+        assert!(bomb.len() < 4096);
+
+        assert!(decompress_gzip(&bomb, 1024 * 1024).await.is_ok());
+        assert!(matches!(
+            decompress_gzip(&bomb, 1024 * 1024 - 1).await,
+            Err(PacketRecvError::Limit(LimitError::PacketTooLarge(_)))
+        ));
+    }
+
+    #[test]
+    fn skip_tree_must_match_the_offer() {
+        let file = |name: &str, size| FilesAvailable::File {
+            name: name.to_string(),
+            size,
+            mtime: None,
+        };
+        let skip = |name: &str, skip| FilesToSkip::File {
+            name: name.to_string(),
+            skip,
+        };
+        let offered = FilesAvailable::Dir {
+            name: "root".to_string(),
+            files: vec![
+                file("a", 10),
+                FilesAvailable::Dir {
+                    name: "sub".to_string(),
+                    files: vec![file("b", 20)],
+                },
+            ],
+        };
+        let dir = |name: &str, files| FilesToSkip::Dir {
+            name: name.to_string(),
+            files,
+        };
+
+        assert!(dir("root", vec![skip("a", 10)]).applies_to(&offered));
+        assert!(dir("root", vec![dir("sub", vec![skip("b", 5)])]).applies_to(&offered));
+        assert!(dir("root", vec![]).applies_to(&offered));
+
+        // Wrong root, unknown entry, wrong kind, skipping past the end
+        assert!(!dir("other", vec![]).applies_to(&offered));
+        assert!(!dir("root", vec![skip("zzz", 1)]).applies_to(&offered));
+        assert!(!dir("root", vec![skip("sub", 1)]).applies_to(&offered));
+        assert!(!dir("root", vec![skip("a", 11)]).applies_to(&offered));
+        // The same entry twice
+        assert!(!dir("root", vec![skip("a", 10), skip("a", 10)]).applies_to(&offered));
+        assert!(!skip("root", 0).applies_to(&offered));
     }
 
     #[test]
@@ -383,6 +594,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -390,10 +602,12 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 20,
+                            mtime: None,
                         },
                         FilesAvailable::File {
                             name: "file3".to_string(),
                             size: 30,
+                            mtime: None,
                         },
                     ],
                 },
@@ -406,12 +620,14 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
                     files: vec![FilesAvailable::File {
                         name: "file2".to_string(),
                         size: 15,
+                        mtime: None,
                     }],
                 },
             ],
@@ -469,6 +685,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -476,10 +693,12 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 20,
+                            mtime: None,
                         },
                         FilesAvailable::File {
                             name: "file3".to_string(),
                             size: 30,
+                            mtime: None,
                         },
                     ],
                 },
@@ -503,6 +722,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -510,16 +730,19 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 20,
+                            mtime: None,
                         },
                         FilesAvailable::File {
                             name: "file3".to_string(),
                             size: 30,
+                            mtime: None,
                         },
                         FilesAvailable::Dir {
                             name: "dir2".to_string(),
                             files: vec![FilesAvailable::File {
                                 name: "file4".to_string(),
                                 size: 40,
+                                mtime: None,
                             }],
                         },
                     ],
@@ -529,6 +752,7 @@ mod tests {
                     files: vec![FilesAvailable::File {
                         name: "file5".to_string(),
                         size: 50,
+                        mtime: None,
                     }],
                 },
             ],
@@ -540,6 +764,7 @@ mod tests {
                 FilesAvailable::File {
                     name: "file1".to_string(),
                     size: 10,
+                    mtime: None,
                 },
                 FilesAvailable::Dir {
                     name: "dir1".to_string(),
@@ -547,6 +772,7 @@ mod tests {
                         FilesAvailable::File {
                             name: "file2".to_string(),
                             size: 5,
+                            mtime: None,
                         },
                         FilesAvailable::Dir {
                             name: "dir2".to_string(),

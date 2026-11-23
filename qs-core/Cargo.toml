@@ -1,10 +1,10 @@
 [package]
 name = "qs-core"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["Maxomatic458"]
 description = "quic send core library"
-repository = "https://github.com/maxomatic458/quic-send"
+repository = "https://github.com/dev-joel-s/quic-send"
 readme = "../README.md"
 license = "MIT"
 keywords = ["quic", "file-transfer", "peer-to-peer"]
@@ -13,14 +13,39 @@ keywords = ["quic", "file-transfer", "peer-to-peer"]
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-quinn = { workspace = true }
-rustls = { workspace = true }
-rcgen = { workspace = true }
-bincode = { workspace = true }
-semver = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+postcard = { workspace = true }
+serde = { workspace = true }
 iroh = { workspace = true }
-async-compression = { version = "0.4.12", features = ["tokio", "gzip"] }
+noq = { workspace = true }
+rustls = { workspace = true }
+aws-lc-rs = { workspace = true }
+pake-cpace = { workspace = true }
+libcrux-ml-kem = { workspace = true }
+zeroize = { workspace = true }
+unicode-normalization = { workspace = true }
+reqwest = { workspace = true }
+qs-rendezvous-api = { workspace = true }
+async-compression = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+fs4 = "1.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Access rights of the identity file, see src/private_file.rs
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = "3"
+qs-rendezvous = { path = "../qs-rendezvous" }
+axum = "0.8"

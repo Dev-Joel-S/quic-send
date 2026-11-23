@@ -1,0 +1,16 @@
+{
+  "name": "quic-send-rendezvous-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rendezvous server for quic-send as a Cloudflare Worker, one Durable Object per code",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "./test.sh"
+  },
+  "devDependencies": {
+    "wrangler": "4.160.1"
+  }
+}

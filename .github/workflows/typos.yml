@@ -1,13 +1,17 @@
 name: Typos
 on: [pull_request]
 
+# Jobs may only read the repository, unless one asks for more itself
+permissions:
+  contents: read
+
 jobs:
   run:
     name: typos
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Actions Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Check spelling
-        uses: crate-ci/typos@master
+        uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
