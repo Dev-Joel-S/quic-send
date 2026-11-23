@@ -6,6 +6,9 @@ on:
     branches: [master]
   # To run the checks on any branch by hand
   workflow_dispatch:
+  # Once a week, so a new advisory for a dependency shows up without a change to the code
+  schedule:
+    - cron: "17 5 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -112,3 +115,19 @@ jobs:
         run: |
           nix run . -- --version
           nix develop -c cargo --version
+
+  deny:
+    name: Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Known vulnerabilities, licenses and where every crate comes from, see deny.toml.
+      # The advisory database is fetched fresh, so a new advisory turns this red without
+      # any change to the code.
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
+        with:
+          command: check
+          arguments: --locked
+          log-level: warn

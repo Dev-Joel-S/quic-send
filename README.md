@@ -273,6 +273,7 @@ What you should know before relying on it:
 - CPace is not a post-quantum PAKE, no audited one exists. What a pairing has against a quantum computer: the key that seals the peer address also depends on ML-KEM-768, so a recorded pairing stays sealed, and CPace has no fixed constants whose one-time break would open every code, each single guess of a code costs an attacker a discrete logarithm of its own.
 - Codes and tickets are not copied to the clipboard unless you ask for it, with `--copy` or `clipboard = true` in the config file. A clipboard history or a synced clipboard (Windows can sync it to the cloud) would show them to others before they are used.
 - The code of this fork has not been audited by anyone outside either.
+- CI checks every dependency with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) on every change and once a week: known vulnerabilities, licenses, and that every crate comes from crates.io (`deny.toml`). `cargo deny check` runs the same locally.
 
 ## License
 
