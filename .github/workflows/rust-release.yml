@@ -3,9 +3,10 @@ name: Release
 # A tag `v<version>` builds and publishes a release. A tag with a "-" in it, like
 # `v1.2.0-rc1`, becomes a prerelease.
 #
-# A prerelease can also be made without pushing a tag: start the workflow by hand and give
-# it the tag, such as `v1.2.0-alpha.1`. The release creates the tag at the commit the run
-# was started for.
+# A release can also be made without pushing a tag: start the workflow by hand and give
+# it the tag, such as `v1.2.0-alpha.1` or `v1.2.0`. The release creates the tag at the
+# commit the run was started for. A tag without a "-" is a full release, and then has to be
+# the version in qs-cli/Cargo.toml and the run has to be started on the default branch.
 #
 # To try the whole thing without leaving anything behind, give it a tag that ends in
 # `-test`, such as `v0.0.1-test`: it is published as a prerelease, the uploaded files are
@@ -18,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       test_tag:
-        description: "Tag for a prerelease (v1.2.0-alpha.1). Ending in -test: removed again after the check. Empty: only build"
+        description: "Tag to release (v1.2.0-beta.1, or v1.2.0 for a full release). Ending in -test: removed again after the check. Empty: only build"
         required: false
         default: ""
 
@@ -49,15 +50,20 @@ jobs:
           TEST_TAG: ${{ inputs.test_tag }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           crate=$(sed -n 's/^version = "\(.*\)"/\1/p' qs-cli/Cargo.toml | head -n 1)
 
           if [ "$REF_TYPE" = tag ]; then
             tag=$REF_NAME
           elif [ -n "$TEST_TAG" ]; then
-            # Only prereleases this way. A full release is a tag somebody pushed.
-            if ! printf '%s' "$TEST_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z][0-9A-Za-z.]*$'; then
-              echo "::error::a prerelease tag looks like v1.2.0-alpha.1, a test tag like v0.0.1-test"
+            if ! printf '%s' "$TEST_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$'; then
+              echo "::error::a tag looks like v1.2.0, v1.2.0-beta.1 or v0.0.1-test"
+              exit 1
+            fi
+            # A full release comes from the default branch only, not from a work branch
+            if ! printf '%s' "$TEST_TAG" | grep -q -- '-' && [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+              echo "::error::a full release ($TEST_TAG) is only made from $DEFAULT_BRANCH, this run is on $REF_NAME. Merge first, or use a prerelease tag like $TEST_TAG-beta.1"
               exit 1
             fi
             tag=$TEST_TAG
