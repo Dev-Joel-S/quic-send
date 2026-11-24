@@ -1,0 +1,64 @@
+# cargo-deny: checks the dependencies on every change, independently of whoever wrote the
+# code. `cargo deny check` runs it locally, CI runs it in the job "Dependencies".
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Every platform the program is built for, so Windows-only crates are checked too
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+]
+
+# Known security advisories, from the RustSec database
+[advisories]
+# A crate with a published vulnerability fails the check, unless it is listed in `ignore`
+# with the reason why it does not apply here
+ignore = []
+# A crate whose maintainers gave it up fails the check only if this project uses it
+# directly. Transitive ones (pulled in by iroh, clap and others) are reported as warnings,
+# they can only be removed by those projects.
+unmaintained = "workspace"
+# A version that was pulled from crates.io fails the check
+yanked = "deny"
+
+# Licenses of all dependencies. The program is MIT, everything it contains has to allow that.
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "CC0-1.0",
+    "Unicode-3.0",
+    # The root certificate list of webpki-roots
+    "CDLA-Permissive-2.0",
+    # Weak copyleft per file: the files stay MPL, which is compatible with an MIT program
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of the same crate are allowed (the dependency graph has a few), but shown
+multiple-versions = "warn"
+# A dependency without a version (`*`) is refused. The workspace crates refer to each other
+# by path, which is fine.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# Where crates may come from: crates.io only. A crate from another registry or straight
+# from a git repository fails the check.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
