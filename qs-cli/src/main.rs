@@ -41,7 +41,7 @@ mod ui;
 
 #[derive(Parser, Debug)]
 #[clap(
-    name = "qsend",
+    name = "zeugma",
     version = QS_PROTO_VERSION,
     author = env!("CARGO_PKG_AUTHORS"),
     about = "Send files and folders from one computer to another, peer to peer over QUIC"
@@ -81,7 +81,7 @@ enum Mode {
         password: bool,
 
         /// Send to a saved peer, without code or ticket. It has to be waiting with
-        /// `qsend receive --from <you>`
+        /// `zeugma receive --from <you>`
         #[clap(long, value_name = "NAME", conflicts_with = "direct")]
         to: Option<String>,
 
@@ -193,7 +193,7 @@ async fn main() -> ExitCode {
         .with(tracing_subscriber::fmt::layer())
         .with(
             Targets::new()
-                .with_target("qsend", level)
+                .with_target("zeugma", level)
                 .with_target("qs_core", level)
                 .with_default(dependencies),
         )
@@ -205,7 +205,7 @@ async fn main() -> ExitCode {
         let _ = colored::control::set_virtual_terminal(true);
     }
 
-    tracing::debug!("qsend {}", QS_PROTO_VERSION);
+    tracing::debug!("zeugma {}", QS_PROTO_VERSION);
     watch_ctrl_c();
 
     match run(args).await {
@@ -398,7 +398,7 @@ async fn send(
             .map_err(|e| {
                 format!(
                     "could not send to {alias}: {e}\n\
-                     It has to be waiting with `qsend receive --from <name of this device>`, \
+                     It has to be waiting with `zeugma receive --from <name of this device>`, \
                      and both sides have to have saved each other."
                 )
             })?;
@@ -421,7 +421,7 @@ async fn send(
             qs_core::pairing::first_available(&servers)
                 .await
                 .map_err(|e| {
-                    format!("{e}\n`qsend send --direct` works without a rendezvous server.")
+                    format!("{e}\n`zeugma send --direct` works without a rendezvous server.")
                 })?,
         ),
     };
@@ -442,7 +442,7 @@ async fn send(
                 .flatten();
             print_secret("Code", &code, clipboard.is_some());
             println!("on the other peer, run the following command:\n");
-            println!("{}\n", format!("qsend receive {code}").yellow());
+            println!("{}\n", format!("zeugma receive {code}").yellow());
             println!(
                 "{}",
                 format!(
@@ -487,7 +487,7 @@ async fn send(
             }
 
             println!("on the other peer, run the following command:\n");
-            println!("{}\n", "qsend receive <ticket>".yellow());
+            println!("{}\n", "zeugma receive <ticket>".yellow());
             if password.is_some() {
                 println!("{}", "It will be asked for the password.".dimmed());
             }
@@ -792,7 +792,7 @@ fn output_dir(output: Option<PathBuf>) -> PathBuf {
 }
 
 /// The output directory, created if missing and as an absolute path.
-/// A relative path, like `.`, is relative to the directory qsend was started in.
+/// A relative path, like `.`, is relative to the directory zeugma was started in.
 fn resolve_output_dir(output: Option<PathBuf>) -> io::Result<PathBuf> {
     let output = output_dir(output);
     std::fs::create_dir_all(&output)?;

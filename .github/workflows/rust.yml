@@ -74,7 +74,7 @@ jobs:
         run: cargo build --locked -p qs-cli --target x86_64-unknown-linux-musl
 
       - name: Check that the binary is static
-        run: file target/x86_64-unknown-linux-musl/debug/qsend | grep -q "static"
+        run: file target/x86_64-unknown-linux-musl/debug/zeugma | grep -q "static"
 
   worker:
     name: Rendezvous Worker

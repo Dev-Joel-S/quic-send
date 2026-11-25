@@ -2,7 +2,7 @@
 name = "qs-rendezvous"
 version = "0.5.0"
 edition = "2021"
-description = "Rendezvous server for quic-send, an untrusted mailbox for pairing"
+description = "Rendezvous server for zeugma, an untrusted mailbox for pairing"
 repository = "https://github.com/dev-joel-s/quic-send"
 license = "MIT"
 publish = false
@@ -24,9 +24,9 @@ rustls = { workspace = true }
 
 [[bin]]
 path = "src/main.rs"
-name = "qs-rendezvous"
+name = "zeugma-rendezvous"
 
 # DONE: dependencies, the `qs-rendezvous` binary and the shared message types
 #       (`qs-rendezvous-api`).
-# DONE: the release workflow builds the static Linux binary and puts it next to `qsend`.
+# DONE: the release workflow builds the static Linux binary and puts it next to `zeugma`.
 # TODO: a .deb with the systemd unit from `packaging/qs-rendezvous.service`.

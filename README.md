@@ -1,11 +1,11 @@
-# quic-send (fork)
+# zeugma (fork)
 
 A peer-to-peer file transfer tool that uses the QUIC protocol to transfer data over a direct connection.
 
 This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomatic458/quic-send), which was archived in favor of [fsend](https://github.com/maxomatic458/fsend). The upstream author moved towards WebRTC, this fork stays on QUIC, which is the better fit for large transfers.
 
 > [!NOTE]
-> quic-send is peer to peer: the two machines talk to each other directly, there is no relay in between. That needs one of them to be reachable by the other: the same network, IPv6 without a blocking firewall, a public IP address or a forwarded UDP port. Behind two NAT routers on IPv4 a connection fails, unless you run [your own relay](#your-own-relay).
+> zeugma is peer to peer: the two machines talk to each other directly, there is no relay in between. That needs one of them to be reachable by the other: the same network, IPv6 without a blocking firewall, a public IP address or a forwarded UDP port. Behind two NAT routers on IPv4 a connection fails, unless you run [your own relay](#your-own-relay).
 
 ## What this fork changes
 
@@ -34,22 +34,22 @@ Prebuilt downloads are on the [releases page](https://github.com/dev-joel-s/quic
 
 | Platform | Download |
 |----------|----------|
-| Any Linux (Debian, Arch, NixOS, ...) | `qsend-<version>-x86_64-linux.tar.gz`, static binaries without dependencies: `qsend` and the rendezvous server `qs-rendezvous` |
-| Debian, Ubuntu | `quic-send_<version>-1_amd64.deb`, install with `sudo apt install ./quic-send_*.deb` |
-| Windows | `qsend-<version>-x86_64-windows.exe`, a standalone executable |
+| Any Linux (Debian, Arch, NixOS, ...) | `zeugma-<version>-x86_64-linux.tar.gz`, static binaries without dependencies: `zeugma` and the rendezvous server `zeugma-rendezvous` |
+| Debian, Ubuntu | `zeugma_<version>-1_amd64.deb`, install with `sudo apt install ./zeugma_*.deb` |
+| Windows | `zeugma-<version>-x86_64-windows.exe`, a standalone executable |
 
 `<version>` is the version of the release, like `0.5.0` or `0.5.0-beta`. `SHA256SUMS` lists the checksums of all files.
 
 On Arch Linux, download the `PKGBUILD` that is attached to the release and run `makepkg -si` next to it. It builds from the source archive of that release and has its checksum.
 
-On NixOS, or anywhere with Nix, the repo is a flake with `qsend` and `qs-rendezvous` in one package (x86_64-linux):
+On NixOS, or anywhere with Nix, the repo is a flake with `zeugma` and `zeugma-rendezvous` in one package (x86_64-linux):
 
 ```
 nix run github:dev-joel-s/quic-send -- send <file/folder>
 nix profile install github:dev-joel-s/quic-send
 ```
 
-In a NixOS configuration, add `inputs.quic-send.url = "github:dev-joel-s/quic-send";` and put `inputs.quic-send.packages.${pkgs.system}.default` into `environment.systemPackages`. `nix develop` gives a shell with the Rust toolchain for working on the code. The package links the `aws-lc` of nixpkgs instead of the copy inside the Rust crate, and its build runs the tests with it.
+In a NixOS configuration, add `inputs.zeugma.url = "github:dev-joel-s/quic-send";` and put `inputs.zeugma.packages.${pkgs.system}.default` into `environment.systemPackages`. `nix develop` gives a shell with the Rust toolchain for working on the code. The package links the `aws-lc` of nixpkgs instead of the copy inside the Rust crate, and its build runs the tests with it.
 
 From source, with a Rust toolchain:
 
@@ -64,27 +64,27 @@ cargo install --locked --git https://github.com/dev-joel-s/quic-send qs-cli
 Without a rendezvous server, the sender prints a ticket that carries its address and public key:
 
 ```
-$ qsend send <file/folder>
+$ zeugma send <file/folder>
 Ticket:
 
 qs1:TYXpn-lm8ladLNDYvhrI_nKROlu2vy2HvxDI6Ync2pIBAQDAAAICme8C
 
 on the other peer, run the following command:
 
-qsend receive <ticket>
+zeugma receive <ticket>
 ```
 
 With a rendezvous server (see [below](#running-a-rendezvous-server)), it shows a short code instead:
 
 ```
-$ qsend send --rendezvous https://rz.example.com <file/folder>
+$ zeugma send --rendezvous https://rz.example.com <file/folder>
 Code:
 
 K7X4-M2QP
 
 on the other peer, run the following command:
 
-qsend receive K7X4-M2QP
+zeugma receive K7X4-M2QP
 ```
 
 The receiver needs the same rendezvous server. Several can be listed (`rendezvous = [...]` in the config file, or `--rendezvous` more than once): the sender uses the first one that answers, the receiver looks for the code on them in the same order. Keep the list the same on both sides: if the two end up on different servers, the receiver can meet somebody else's code that happens to have the same first two characters there, and both pairings fail. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
@@ -95,12 +95,12 @@ Both sides print a short fingerprint of their own id and of the peer's (`This de
 
 ### Dragging files into the terminal
 
-Paths can be dragged into the terminal window, the shell pastes the quoted path and `qsend` handles it.
+Paths can be dragged into the terminal window, the shell pastes the quoted path and `zeugma` handles it.
 
-Or run `qsend send` without any path and drag files and folders into the window one after another. Each one is listed with its size, an empty line starts the transfer:
+Or run `zeugma send` without any path and drag files and folders into the window one after another. Each one is listed with its size, an empty line starts the transfer:
 
 ```
-$ qsend send
+$ zeugma send
 Drag files or folders into this window, or type their paths.
 Press Enter on an empty line to send them, Ctrl+C to cancel.
 
@@ -124,18 +124,18 @@ Files go to your Downloads folder, the path is printed before anything is receiv
 ### With an extra password
 
 ```
-$ qsend send --password <file/folder>
-$ qsend receive K7X4-M2QP
+$ zeugma send --password <file/folder>
+$ zeugma receive K7X4-M2QP
 ```
 
-The password is prompted for, never passed as an argument or read from a pipe. The receiver is asked for it on its own when the sender set one, `qsend receive --password` asks right away.
+The password is prompted for, never passed as an argument or read from a pipe. The receiver is asked for it on its own when the sender set one, `zeugma receive --password` asks right away.
 
 With a short code the password goes into the PAKE in addition to the code. With a ticket it is checked inside the connection, again with a PAKE, so it is never sent. The sender allows three wrong attempts.
 
 ### Without any server
 
 ```
-$ qsend send --port 4433 <file/folder>
+$ zeugma send --port 4433 <file/folder>
 Ticket:
 
 qs1:TYXpn-lm8ladLNDYvhrI_nKROlu2vy2HvxDI6Ync2pIBAQDAAAICme8C
@@ -144,36 +144,36 @@ or, typed by hand, one of:
 
 192.168.1.5:4433/4d85e99fe966f2569d2cd0d8be1ac8fe72913a5bb6bf2d87bf10c8e989dcda92
 
-$ qsend receive 192.168.1.5:4433/4d85e99f...
+$ zeugma receive 192.168.1.5:4433/4d85e99f...
 ```
 
 Nothing but the two machines is involved. The address always comes with the public key: an IP address alone could not be authenticated and is refused.
 
 The sender has to be reachable by the receiver: the same network, IPv6 without a firewall that blocks it, a public IP address, or a forwarded UDP port. `--port` gives the sender a fixed port to forward. There is no hole punching, which needs a relay to coordinate.
 
-`qsend send --direct` prints a ticket even when a rendezvous server is configured.
+`zeugma send --direct` prints a ticket even when a rendezvous server is configured.
 
 ### Saved peers
 
 Two machines that transfer often can save each other once and need no code afterwards:
 
 ```
-laptop$  qsend send --save-peer homelab <file>
-homelab$ qsend receive --save-peer laptop <code or ticket>
+laptop$  zeugma send --save-peer homelab <file>
+homelab$ zeugma receive --save-peer laptop <code or ticket>
 ```
 
 From then on:
 
 ```
-homelab$ qsend receive --from laptop
-laptop$  qsend send --to homelab <file/folder>
+homelab$ zeugma receive --from laptop
+laptop$  zeugma send --to homelab <file/folder>
 ```
 
-`qsend peers` lists the saved peers, `qsend peers remove <name>` forgets one.
+`zeugma peers` lists the saved peers, `zeugma peers remove <name>` forgets one.
 
 A saved peer is recognized by its public key, no server takes part in that. For this, both machines use a key that stays the same, kept in `identity.key` in the config directory. Every other transfer uses a fresh key, so nothing links one transfer to the next. A key that stays can be recognized by the relay, which is the price of not needing a code.
 
-Only your user can read `identity.key`: mode 0600 on Linux, and on Windows an access list of its own with your account as the only entry, nothing inherited from the folder. That does not stop an administrator, a backup or somebody who reads the disk from another system. `qsend peers passphrase` seals the key with a passphrase as well (PBKDF2-HMAC-SHA256 with 600,000 rounds and ChaCha20-Poly1305, both from aws-lc-rs). You are then asked for it whenever a saved peer is used. An empty passphrase removes it again, and a forgotten one cannot be recovered: remove the file and save your peers again. Run `qsend peers passphrase` before the first `--save-peer` if you want a key that was never on the disk without the passphrase. Sealing a key that was already stored cannot undo that, the old copy may still be found by somebody who reads the disk itself.
+Only your user can read `identity.key`: mode 0600 on Linux, and on Windows an access list of its own with your account as the only entry, nothing inherited from the folder. That does not stop an administrator, a backup or somebody who reads the disk from another system. `zeugma peers passphrase` seals the key with a passphrase as well (PBKDF2-HMAC-SHA256 with 600,000 rounds and ChaCha20-Poly1305, both from aws-lc-rs). You are then asked for it whenever a saved peer is used. An empty passphrase removes it again, and a forgotten one cannot be recovered: remove the file and save your peers again. Run `zeugma peers passphrase` before the first `--save-peer` if you want a key that was never on the disk without the passphrase. Sealing a key that was already stored cannot undo that, the old copy may still be found by somebody who reads the disk itself.
 
 The peer is dialed at the address it had when it was saved (its IP addresses, and its relay if you run one). If it moved, pair once more with `--save-peer`. Give the receiving machine a fixed `--port`, so the address stays the same.
 
@@ -181,17 +181,17 @@ If a peer is saved after a transfer with a plain ticket and no password, the sen
 
 ### Config file
 
-`qsend config` shows where the config file is and which settings are in effect. Flags on the command line override it.
+`zeugma config` shows where the config file is and which settings are in effect. Flags on the command line override it.
 
 ```toml
-# ~/.config/quic-send/config.toml on Linux, %APPDATA%\quic-send\config.toml on Windows
+# ~/.config/zeugma/config.toml on Linux, %APPDATA%\zeugma\config.toml on Windows
 
-# Rendezvous servers for short codes, tried in this order. Without one, qsend prints
+# Rendezvous servers for short codes, tried in this order. Without one, zeugma prints
 # a ticket instead. No server is built into the program.
 rendezvous = ["https://rz.example.com", "https://backup.example.org"]
 # "disabled" (no relay, the default) or the URL of your own relay
 relay = "disabled"
-# Where received files go. "." is the directory qsend is started in.
+# Where received files go. "." is the directory zeugma is started in.
 output_dir = "/home/me/Downloads"
 # Fixed UDP port instead of a random one
 port = 4433
@@ -205,9 +205,11 @@ homelab = "4d85e99fe966f2569d2cd0d8be1ac8fe72913a5bb6bf2d87bf10c8e989dcda92"
 
 A mistake in the file, including a setting that does not exist, is an error with the line it is on.
 
+The program was called quic-send before. If the `quic-send` folder of an older version is there and the `zeugma` one is not, it is moved on the first start, with the settings, the saved peers and the identity.
+
 ## Running a rendezvous server
 
-No rendezvous server is built into `qsend`. Short codes need one that you or somebody you know runs, and its address in the config file of both sides. There are two implementations of the same API ([docs/rendezvous-api.md](docs/rendezvous-api.md)), a client cannot tell them apart:
+No rendezvous server is built into `zeugma`. Short codes need one that you or somebody you know runs, and its address in the config file of both sides. There are two implementations of the same API ([docs/rendezvous-api.md](docs/rendezvous-api.md)), a client cannot tell them apart:
 
 - A **Cloudflare Worker**, in [rendezvous-worker](rendezvous-worker/). This is the one to start with: no machine to look after, and no domain of your own needed, Cloudflare gives it a `workers.dev` address. Every code has its own Durable Object. With a free Cloudflare account and Node.js:
 
@@ -219,12 +221,12 @@ No rendezvous server is built into `qsend`. Short codes need one that you or som
   ```
 
   `deploy` prints the address, which goes into `rendezvous = [...]` in the config file of both sides. More in [rendezvous-worker/README.md](rendezvous-worker/README.md).
-- The **Rust server** `qs-rendezvous`, in this repo and in the Linux download, for your own machine.
+- The **Rust server** `zeugma-rendezvous`, in this repo and in the Linux download, for your own machine.
 
 Both pass three opaque messages between the two peers of a pairing and have no secrets. The rest of this section is about the Rust server, which keeps everything in memory.
 
 ```
-$ qs-rendezvous --listen 127.0.0.1:8080
+$ zeugma-rendezvous --listen 127.0.0.1:8080
 ```
 
 Put a reverse proxy with TLS in front of it and tell the server to take the client address from the proxy, so the limits per address work. With [Caddy](https://caddyserver.com):
@@ -236,12 +238,12 @@ rz.example.com {
 ```
 
 ```
-$ qs-rendezvous --listen 127.0.0.1:8080 --behind-proxy
+$ zeugma-rendezvous --listen 127.0.0.1:8080 --behind-proxy
 ```
 
-Only use `--behind-proxy` behind a proxy that sets `X-Forwarded-For` itself, otherwise clients can pick their own address. With nginx that is `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. An example systemd unit is in [packaging/qs-rendezvous.service](packaging/qs-rendezvous.service).
+Only use `--behind-proxy` behind a proxy that sets `X-Forwarded-For` itself, otherwise clients can pick their own address. With nginx that is `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. An example systemd unit is in [packaging/zeugma-rendezvous.service](packaging/zeugma-rendezvous.service).
 
-Plain `http://` works too, for a server on your own network. The messages stay sealed, but the pairing can be watched and disturbed on the way, and `qsend` says so.
+Plain `http://` works too, for a server on your own network. The messages stay sealed, but the pairing can be watched and disturbed on the way, and `zeugma` says so.
 
 A code is valid for five minutes (`--ttl`) and good for one attempt. That one attempt is what makes a six character secret enough. Looking at a slot is not an attempt: anyone can fetch the first message of any of the 1024 slots as often as they like, it gives nothing away and changes nothing. What uses up a code is a reply to its slot, right or wrong. So somebody who can reach the server can still make a pairing fail by sending a wrong reply before the real receiver does. They learn nothing, and the server limits replies per address, but on a server that is open to the internet expect that this can happen.
 
@@ -253,7 +255,7 @@ By default there is no relay: the two machines connect directly or not at all. I
 
 ## Comparison with other file transfer tools
 
-| Feature | quic-send (fork) | upstream quic-send | [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) | [croc](https://github.com/schollz/croc) |
+| Feature | zeugma (fork) | upstream quic-send | [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) | [croc](https://github.com/schollz/croc) |
 |---------|------------------|--------------------|--------------------------------------------------------------------|-----------------------------------------|
 | Encryption | ✅ | ✅ | ✅ | ✅ |
 | Direct (P2P) transfer | ✅ | ✅ | (✅)* | ❌ |
@@ -265,7 +267,7 @@ By default there is no relay: the two machines connect directly or not at all. I
 | Works without any server | ✅ | ❌ | ❌ | ❌ |
 | Self-hostable infrastructure | ✅ | (✅) | ✅ | ✅ |
 
-\* While it is possible in Magic Wormhole, establishing a direct connection is unlikely, since it tries to establish a direct TCP connection. quic-send connects directly over UDP, and with your own relay also through NAT by hole punching.
+\* While it is possible in Magic Wormhole, establishing a direct connection is unlikely, since it tries to establish a direct TCP connection. zeugma connects directly over UDP, and with your own relay also through NAT by hole punching.
 
 ## Security model
 
@@ -279,7 +281,7 @@ The code, or the ticket, is the secret. Anyone who sees it in time can take the 
 
 ### Post-quantum protection
 
-What a quantum computer could do to quic-send, and what is done about it:
+What a quantum computer could do to zeugma, and what is done about it:
 
 | Part | Algorithm | Against a recorded transfer that is attacked later | Against an attacker who has a quantum computer while the transfer runs |
 |------|-----------|-----------------------------------------------------|------------------------------------------------------------------------|

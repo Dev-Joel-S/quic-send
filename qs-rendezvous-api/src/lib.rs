@@ -1,4 +1,4 @@
-//! Wire format of the quic-send rendezvous server, shared by the server
+//! Wire format of the zeugma rendezvous server, shared by the server
 //! (`qs-rendezvous`) and the client (`qs_core::pairing::rendezvous`).
 //!
 //! The full specification, for anyone who wants to write another server, is in

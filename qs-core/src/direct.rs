@@ -9,7 +9,7 @@
 //! DONE: an encoded ticket starts with `qs1:`. An unknown version is reported as such
 //!       ([TicketError::UnknownVersion]) instead of as garbage.
 //! DONE: this mode works with nothing but an IP address: no rendezvous, no relay, no hole
-//!       punching (`qsend send --relay disabled`, covered by the end to end tests, which run
+//!       punching (`zeugma send --relay disabled`, covered by the end to end tests, which run
 //!       without a relay). An IP without the key is not accepted, it could not be
 //!       authenticated.
 //! DONE: a form that can be typed, `192.168.1.5:4433/<key>` ([Ticket::typable] to print,
@@ -33,7 +33,7 @@ const PREFIX: &str = "qs1:";
 pub enum TicketError {
     #[error("this is not a valid ticket")]
     Invalid,
-    #[error("this ticket was made by a newer version of quic-send (ticket format {0})")]
+    #[error("this ticket was made by a newer version of zeugma (ticket format {0})")]
     UnknownVersion(String),
     #[error("the ticket contains no address to connect to")]
     NoAddress,

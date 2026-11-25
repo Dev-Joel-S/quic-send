@@ -1,5 +1,5 @@
 {
-  description = "quic-send: send files and folders from one computer to another, peer to peer over QUIC";
+  description = "zeugma: send files and folders from one computer to another, peer to peer over QUIC";
 
   # nixpkgs as the tarball of its channel. flake.lock pins the exact revision.
   inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
@@ -13,12 +13,12 @@
 
       version = (builtins.fromTOML (builtins.readFile ./qs-cli/Cargo.toml)).package.version;
 
-      # The whole workspace as one package: `qsend` and the rendezvous server
-      # `qs-rendezvous`. The crates come from Cargo.lock, with the checksums in there.
+      # The whole workspace as one package: `zeugma` and the rendezvous server
+      # `zeugma-rendezvous`. The crates come from Cargo.lock, with the checksums in there.
       package =
         pkgs:
         pkgs.rustPlatform.buildRustPackage {
-          pname = "quic-send";
+          pname = "zeugma";
           inherit version;
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
@@ -42,25 +42,25 @@
             description = "Send files and folders from one computer to another, peer to peer over QUIC";
             homepage = "https://github.com/dev-joel-s/quic-send";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "qsend";
+            mainProgram = "zeugma";
             platforms = systems;
           };
         };
     in
     {
       packages = forEachSystem (pkgs: rec {
-        quic-send = package pkgs;
-        default = quic-send;
+        zeugma = package pkgs;
+        default = zeugma;
       });
 
       # `nix flake check` builds the package, which runs the tests
       checks = forEachSystem (pkgs: {
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) quic-send;
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) zeugma;
       });
 
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.quic-send ];
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.zeugma ];
           packages = [
             pkgs.clippy
             pkgs.rustfmt

@@ -1,7 +1,7 @@
-# Rendezvous server for quic-send as a Cloudflare Worker.
+# Rendezvous server for zeugma as a Cloudflare Worker.
 # `npx wrangler deploy` in this directory puts it on your account, see README.md.
 
-name = "quic-send-rendezvous"
+name = "zeugma-rendezvous"
 main = "src/index.js"
 compatibility_date = "2025-09-01"
 
@@ -50,7 +50,7 @@ simple = { limit = 120, period = 60 }
 
 # For the tests in test.sh: no limits, so one address can make thousands of requests.
 [env.test]
-name = "quic-send-rendezvous-test"
+name = "zeugma-rendezvous-test"
 
 [[env.test.durable_objects.bindings]]
 name = "SLOT"

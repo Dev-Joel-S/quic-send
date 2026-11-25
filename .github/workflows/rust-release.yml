@@ -109,9 +109,9 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           mkdir dist
-          git archive --format=tar.gz --prefix="quic-send-$VERSION/" \
-            -o "dist/quic-send-$VERSION.tar.gz" HEAD
-          sum=$(sha256sum "dist/quic-send-$VERSION.tar.gz" | cut -d ' ' -f 1)
+          git archive --format=tar.gz --prefix="zeugma-$VERSION/" \
+            -o "dist/zeugma-$VERSION.tar.gz" HEAD
+          sum=$(sha256sum "dist/zeugma-$VERSION.tar.gz" | cut -d ' ' -f 1)
 
           sed -e "s/^pkgver=.*/pkgver=$(printf '%s' "$VERSION" | tr - _)/" \
               -e "s/^_version=.*/_version=$VERSION/" \
@@ -148,8 +148,8 @@ jobs:
           chown -R build pkg
           cd pkg
           sudo -u build makepkg --noconfirm
-          pacman -U --noconfirm quic-send-*.pkg.tar.zst
-          qsend --version
+          pacman -U --noconfirm zeugma-*.pkg.tar.zst
+          zeugma --version
 
   linux:
     name: Linux (static musl, .deb)
@@ -178,17 +178,17 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           bin=target/x86_64-unknown-linux-musl/release
-          file "$bin/qsend" | grep -q static
-          "$bin/qsend" --version
+          file "$bin/zeugma" | grep -q static
+          "$bin/zeugma" --version
 
-          name="qsend-$VERSION-x86_64-linux"
+          name="zeugma-$VERSION-x86_64-linux"
           mkdir -p dist "$name"
-          cp "$bin/qsend" "$bin/qs-rendezvous" README.md LICENSE packaging/qs-rendezvous.service "$name/"
+          cp "$bin/zeugma" "$bin/zeugma-rendezvous" README.md LICENSE packaging/zeugma-rendezvous.service "$name/"
           tar czf "dist/$name.tar.gz" "$name"
 
           cargo deb -p qs-cli --target x86_64-unknown-linux-musl --no-build --output dist/
           sudo dpkg -i dist/*.deb
-          /usr/bin/qsend --version
+          /usr/bin/zeugma --version
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -215,12 +215,12 @@ jobs:
         env:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          exe=target/x86_64-pc-windows-msvc/release/qsend.exe
+          exe=target/x86_64-pc-windows-msvc/release/zeugma.exe
           "$exe" --version
 
           mkdir -p dist
-          cp "$exe" "dist/qsend-$VERSION-x86_64-windows.exe"
-          7z a "dist/qsend-$VERSION-x86_64-windows.zip" "./$exe" README.md LICENSE
+          cp "$exe" "dist/zeugma-$VERSION-x86_64-windows.exe"
+          7z a "dist/zeugma-$VERSION-x86_64-windows.zip" "./$exe" README.md LICENSE
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -285,15 +285,15 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           base="https://github.com/$REPO/releases/download/$TAG"
-          for file in SHA256SUMS PKGBUILD "quic-send-$VERSION.tar.gz" \
-              "qsend-$VERSION-x86_64-linux.tar.gz" "qsend-$VERSION-x86_64-windows.exe" \
-              "qsend-$VERSION-x86_64-windows.zip"; do
+          for file in SHA256SUMS PKGBUILD "zeugma-$VERSION.tar.gz" \
+              "zeugma-$VERSION-x86_64-linux.tar.gz" "zeugma-$VERSION-x86_64-windows.exe" \
+              "zeugma-$VERSION-x86_64-windows.zip"; do
             curl -fsSL --retry 5 --retry-delay 3 -o "$file" "$base/$file"
           done
           sha256sum --check --ignore-missing SHA256SUMS
 
           # The PKGBUILD points at the archive of this release and has its checksum
-          sum=$(sha256sum "quic-send-$VERSION.tar.gz" | cut -d ' ' -f 1)
+          sum=$(sha256sum "zeugma-$VERSION.tar.gz" | cut -d ' ' -f 1)
           grep -q "^sha256sums=('$sum')$" PKGBUILD
           grep -q "^_version=$VERSION$" PKGBUILD
 
@@ -302,9 +302,9 @@ jobs:
           curl -fsSL --retry 5 --retry-delay 3 -o from-pkgbuild.tar.gz "$address"
           echo "$sum  from-pkgbuild.tar.gz" | sha256sum --check
 
-          tar xzf "qsend-$VERSION-x86_64-linux.tar.gz"
-          "qsend-$VERSION-x86_64-linux/qsend" --version
-          "qsend-$VERSION-x86_64-linux/qs-rendezvous" --version
+          tar xzf "zeugma-$VERSION-x86_64-linux.tar.gz"
+          "zeugma-$VERSION-x86_64-linux/zeugma" --version
+          "zeugma-$VERSION-x86_64-linux/zeugma-rendezvous" --version
 
   cleanup:
     name: Remove the test release

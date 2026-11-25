@@ -34,10 +34,10 @@ tempfile = "3"
 
 [[bin]]
 path = "src/main.rs"
-name = "qsend"
+name = "zeugma"
 
 [package.metadata.deb]
-name = "quic-send"
+name = "zeugma"
 maintainer = "Joel Summa <74009152+Dev-Joel-S@users.noreply.github.com>"
 copyright = "2024 Maxomatic458, 2026 Joel Summa"
 license-file = ["../LICENSE", "0"]
@@ -49,6 +49,6 @@ priority = "optional"
 # The release binary is statically linked against musl
 depends = ""
 assets = [
-    ["target/release/qsend", "usr/bin/", "755"],
-    ["../README.md", "usr/share/doc/quic-send/README.md", "644"],
+    ["target/release/zeugma", "usr/bin/", "755"],
+    ["../README.md", "usr/share/doc/zeugma/README.md", "644"],
 ]

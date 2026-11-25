@@ -2,7 +2,7 @@
 //!
 //! The logic is in `qs_core::peers`. Peers saved with `--save-peer` are kept in
 //! `known_peers.json` next to the config file. Entries of `[known_peers]` in the config
-//! file are read as well, they only have an id and are never written by qsend.
+//! file are read as well, they only have an id and are never written by zeugma.
 
 use crate::config::{config_dir, RelaySetting, Settings};
 use colored::Colorize;
@@ -49,7 +49,7 @@ pub fn identity(dir: &Path) -> Result<SecretKey, Failure> {
             let key = load_or_create_identity(dir, None)?;
             eprintln!(
                 "{} this device now has an identity that stays, kept in {}. Only you can \
-                 read that file. `qsend peers passphrase` seals it with a passphrase as well.",
+                 read that file. `zeugma peers passphrase` seals it with a passphrase as well.",
                 "note:".yellow().bold(),
                 dir.display()
             );
@@ -211,8 +211,8 @@ pub fn remember(
     println!(
         "Saved this peer as {}. Next time no code is needed: {} or {}",
         alias.bright_white(),
-        format!("qsend send --to {alias}").yellow(),
-        format!("qsend receive --from {alias}").yellow()
+        format!("zeugma send --to {alias}").yellow(),
+        format!("zeugma receive --from {alias}").yellow()
     );
     Ok(())
 }

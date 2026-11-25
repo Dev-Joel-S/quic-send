@@ -1,18 +1,18 @@
-# Example systemd unit for the quic-send rendezvous server.
+# Example systemd unit for the zeugma rendezvous server.
 #
-# Copy to /etc/systemd/system/qs-rendezvous.service, put the binary in /usr/local/bin,
-# then: systemctl daemon-reload && systemctl enable --now qs-rendezvous
+# Copy to /etc/systemd/system/zeugma-rendezvous.service, put the binary in /usr/local/bin,
+# then: systemctl daemon-reload && systemctl enable --now zeugma-rendezvous
 #
 # The server listens on localhost only. Put a reverse proxy with TLS in front of it.
 # Remove --behind-proxy if clients reach the server directly.
 
 [Unit]
-Description=quic-send rendezvous server
+Description=zeugma rendezvous server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/qs-rendezvous --listen 127.0.0.1:8080 --behind-proxy
+ExecStart=/usr/local/bin/zeugma-rendezvous --listen 127.0.0.1:8080 --behind-proxy
 Restart=on-failure
 
 # The server needs no files, no privileges and no home directory

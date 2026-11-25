@@ -1,6 +1,6 @@
 # Rendezvous server as a Cloudflare Worker
 
-The rendezvous server of quic-send, for people who do not want to run a machine for it.
+The rendezvous server of zeugma, for people who do not want to run a machine for it.
 It does the same as the Rust server in [`qs-rendezvous`](../qs-rendezvous): both implement
 [docs/rendezvous-api.md](../docs/rendezvous-api.md), and the same tests run against both.
 A client cannot tell them apart, and you can move from one to the other by changing the
@@ -26,14 +26,14 @@ npx wrangler deploy
 ```
 
 `wrangler deploy` prints the url of the Worker, something like
-`https://quic-send-rendezvous.<your-subdomain>.workers.dev`. Put it into the config file
-of quic-send on both computers (`qsend config` shows where that file is):
+`https://zeugma-rendezvous.<your-subdomain>.workers.dev`. Put it into the config file
+of zeugma on both computers (`zeugma config` shows where that file is):
 
 ```toml
-rendezvous = ["https://quic-send-rendezvous.<your-subdomain>.workers.dev"]
+rendezvous = ["https://zeugma-rendezvous.<your-subdomain>.workers.dev"]
 ```
 
-No server address is built into quic-send, so this step is not optional. Several servers
+No server address is built into zeugma, so this step is not optional. Several servers
 can be listed, they are tried in order.
 
 ## Settings

@@ -1,4 +1,4 @@
-// Rendezvous server for quic-send as a Cloudflare Worker.
+// Rendezvous server for zeugma as a Cloudflare Worker.
 //
 // It implements docs/rendezvous-api.md, like the Rust server in qs-rendezvous/, and the
 // same tests run against both (see test.sh).

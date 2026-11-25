@@ -99,7 +99,7 @@ pub enum PairingError {
     PasswordRequired,
     #[error("a password was given, but the sender did not set one")]
     UnexpectedPassword,
-    #[error("the other side uses a version of quic-send that pairs differently")]
+    #[error("the other side uses a version of zeugma that pairs differently")]
     Version,
     #[error("the pairing failed: {0}")]
     Crypto(#[from] SealError),

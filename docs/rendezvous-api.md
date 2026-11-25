@@ -1,6 +1,6 @@
 # Rendezvous API, version 1
 
-This is what a quic-send rendezvous server has to do. Two implementations exist and are
+This is what a zeugma rendezvous server has to do. Two implementations exist and are
 held to it by the same tests: the Rust server in `qs-rendezvous/` and the Cloudflare Worker
 in `rendezvous-worker/`. A client does not need to know which one it talks to.
 

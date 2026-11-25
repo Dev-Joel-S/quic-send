@@ -1,6 +1,6 @@
 # Maintainer: Joel Summa <74009152+Dev-Joel-S@users.noreply.github.com>
 #
-# Builds quic-send from the source archive of a release.
+# Builds zeugma from the source archive of a release.
 #
 # This file is the template. For every release the release workflow fills in the version
 # and the checksum of the source archive it built, builds the package once on Arch to see
@@ -13,7 +13,7 @@
 # for a tag on its own: that one is generated on request and its checksum is not promised
 # to stay the same.
 
-pkgname=quic-send
+pkgname=zeugma
 pkgver=0.5.0
 # The version as it is in the tag. It can have a "-" in it, which pkgver cannot.
 _version=0.5.0
@@ -54,7 +54,7 @@ check() {
 
 package() {
   cd "$pkgname-$_version"
-  install -Dm755 target/release/qsend "$pkgdir/usr/bin/qsend"
+  install -Dm755 target/release/zeugma "$pkgdir/usr/bin/zeugma"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

@@ -1,4 +1,4 @@
-//! Rendezvous server for quic-send.
+//! Rendezvous server for zeugma.
 //!
 //! An untrusted mailbox. It hands out slots and passes opaque messages between the two
 //! peers of a pairing. It must not be able to do more than deny service, see

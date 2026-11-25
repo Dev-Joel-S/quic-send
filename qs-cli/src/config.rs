@@ -1,15 +1,15 @@
 //! Configuration file of the CLI.
 //!
 //! Lives in the platform config directory (`dirs::config_dir()`), as
-//! `quic-send/config.toml`. Flags on the command line override it.
+//! `zeugma/config.toml`. Flags on the command line override it.
 //!
 //! ```toml
-//! # Rendezvous servers for short codes, tried in this order. Without one, qsend prints
+//! # Rendezvous servers for short codes, tried in this order. Without one, zeugma prints
 //! # a ticket instead. No server is built into the program.
 //! rendezvous = ["https://rendezvous.example.com", "https://backup.example.org"]
 //! # "disabled" (no relay, the default) or the URL of your own relay
 //! relay = "disabled"
-//! # Where received files go. "." is the directory qsend is started in.
+//! # Where received files go. "." is the directory zeugma is started in.
 //! output_dir = "/home/me/Downloads"
 //! # Fixed UDP port instead of a random one
 //! port = 4433
@@ -25,10 +25,10 @@
 //!       the line and the problem, also for an unknown setting (typos are not ignored).
 //! DONE: precedence flag, then config file, then built-in default ([Settings::resolve]),
 //!       with tests.
-//! DONE: `qsend config` prints the path of the file and the values in effect.
-//! DONE: the file is never written by qsend, and no password or secret key belongs in it.
+//! DONE: `zeugma config` prints the path of the file and the values in effect.
+//! DONE: the file is never written by zeugma, and no password or secret key belongs in it.
 //! DONE: the relay mode and the Downloads lookup in `main.rs` use the values from here.
-//! DONE: `output_dir = "."` means the directory qsend is started in, like `-o .` and `--here`.
+//! DONE: `output_dir = "."` means the directory zeugma is started in, like `-o .` and `--here`.
 //! DONE: `known_peers` entries are used by `--to` and `--from`, next to the peers saved
 //!       with `--save-peer` (see `peers.rs`). They only carry an id, so sending to one needs
 //!       an own relay that both sides use.
@@ -181,9 +181,24 @@ impl Config {
     }
 }
 
-/// The directory quic-send keeps its files in
+/// The directory zeugma keeps its files in
 pub fn config_dir() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("quic-send"))
+    Some(config_dir_in(&dirs::config_dir()?))
+}
+
+/// The directory for the files of zeugma inside `base`.
+///
+/// The program was called quic-send before and kept its files in `quic-send`. If that
+/// folder is there and the new one is not, it is moved, so the settings, the saved peers
+/// and the identity carry over. If it cannot be moved, the old folder is used as it is.
+fn config_dir_in(base: &Path) -> PathBuf {
+    let dir = base.join("zeugma");
+    let old = base.join("quic-send");
+
+    if !dir.exists() && old.is_dir() && std::fs::rename(&old, &dir).is_err() {
+        return old;
+    }
+    dir
 }
 
 /// Settings given on the command line, each overrides the config file
@@ -409,6 +424,58 @@ mod tests {
             let settings = Settings::resolve(&NetworkArgs::default(), None, config);
             assert!(settings.rendezvous.is_empty(), "{file}");
         }
+    }
+
+    #[test]
+    fn files_of_the_old_name_move_to_the_new_folder() {
+        let base = tempfile::tempdir().unwrap();
+        let old = base.path().join("quic-send");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("config.toml"), "port = 1").unwrap();
+        std::fs::write(old.join("identity.key"), "key").unwrap();
+
+        let dir = config_dir_in(base.path());
+        assert_eq!(dir, base.path().join("zeugma"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            "port = 1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("identity.key")).unwrap(),
+            "key"
+        );
+        assert!(!old.exists());
+
+        // Asking again changes nothing
+        assert_eq!(config_dir_in(base.path()), dir);
+    }
+
+    #[test]
+    fn existing_new_folder_wins_and_nothing_is_overwritten() {
+        let base = tempfile::tempdir().unwrap();
+        let old = base.path().join("quic-send");
+        let new = base.path().join("zeugma");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(old.join("config.toml"), "old").unwrap();
+        std::fs::write(new.join("config.toml"), "new").unwrap();
+
+        assert_eq!(config_dir_in(base.path()), new);
+        assert_eq!(
+            std::fs::read_to_string(new.join("config.toml")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join("config.toml")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn fresh_machine_gets_the_new_folder() {
+        let base = tempfile::tempdir().unwrap();
+        assert_eq!(config_dir_in(base.path()), base.path().join("zeugma"));
+        assert!(!base.path().join("quic-send").exists());
     }
 
     #[test]

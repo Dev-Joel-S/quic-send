@@ -89,7 +89,7 @@ impl Client {
 
         let http = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
-            .user_agent(concat!("quic-send/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("zeugma/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             // The server is not trusted to send this client anywhere else
             .redirect(reqwest::redirect::Policy::none())
@@ -143,7 +143,7 @@ impl Client {
 
         if info.service != SERVICE_NAME {
             return Err(ClientError::Protocol(
-                "this is not a quic-send rendezvous server".to_string(),
+                "this is not a zeugma rendezvous server".to_string(),
             ));
         }
         if info.api != API_VERSION {

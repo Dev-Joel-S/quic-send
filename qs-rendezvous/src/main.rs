@@ -2,13 +2,13 @@ use clap::Parser;
 use qs_rendezvous::{serve, Config};
 use std::{net::SocketAddr, process::ExitCode, time::Duration};
 
-/// Rendezvous server for quic-send.
+/// Rendezvous server for zeugma.
 ///
 /// An untrusted mailbox: it passes a few opaque messages between two peers that share a
 /// short code. It has no secrets and stores nothing on disk. Put a reverse proxy with TLS
 /// in front of it.
 #[derive(Parser, Debug)]
-#[clap(version)]
+#[clap(name = "zeugma-rendezvous", version)]
 struct Args {
     /// Address and port to listen on
     #[clap(long, default_value = "127.0.0.1:8080")]
