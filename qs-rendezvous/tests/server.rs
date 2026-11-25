@@ -598,9 +598,10 @@ async fn requests_per_address_are_limited() {
     assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited.error(), "rate_limited");
 
-    // Guessing with replies is limited too, also when the guesses lead nowhere
-    assert_eq!(reply(&client, &base, "ZZ").await.error(), "unknown_slot");
-    assert_eq!(reply(&client, &base, "ZY").await.error(), "unknown_slot");
+    // Guessing with replies is limited too, also when the guesses lead nowhere. Lower case
+    // is no nameplate, so this never meets one of the slots created above.
+    assert_eq!(reply(&client, &base, "zz").await.error(), "unknown_slot");
+    assert_eq!(reply(&client, &base, "zy").await.error(), "unknown_slot");
     let limited = reply(&client, &base, &nameplate).await;
     assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited.error(), "rate_limited");
