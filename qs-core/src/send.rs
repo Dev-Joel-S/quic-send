@@ -1,3 +1,26 @@
+//! Sending files.
+//!
+//! PLANNED (branch claude-direct-connect, not started): both sides connect at the same
+//! time, so firewalls and NAT routers on both ends open for each other.
+//! Ground rule for all of these: no server ever carries file data, not even encrypted.
+//! Servers may only help the two peers find each other.
+//! TODO: today only the receiver dials and the sender only accepts. That fails if the
+//!       sender's firewall or router drops packets it did not ask for. The sender also has
+//!       to dial the receiver's addresses at the same moment, then the sender's own
+//!       packets open its side (IPv6 firewalls, and IPv4 routers that map ports the same
+//!       way for every destination).
+//! TODO: whichever of the two connections comes up first is used, the other one is
+//!       closed. Who sends and who receives is decided by the application, not by who
+//!       dialed. The pinning of the peer id stays exactly as it is now.
+//! TODO: the moment both start comes from the rendezvous exchange (see
+//!       `crate::pairing`): both dial right after the sealed addresses were delivered,
+//!       and keep trying for a few seconds.
+//! TODO: saved peers (`Sender::dial`, `Receiver::accept`) get the same, both sides dial.
+//! TODO: tickets have no rendezvous, so nobody can agree on a moment. They stay as they
+//!       are: the sender has to be reachable. Say so in the error when it is not.
+//! TODO: when no path works, say what is most likely in the way (no IPv6 on one side,
+//!       two NAT routers) instead of only timing out.
+
 #![allow(clippy::suspicious_open_options)]
 
 use crate::{

@@ -1,4 +1,20 @@
 //! Setting up the iroh endpoint from the settings in effect.
+//!
+//! PLANNED (branch claude-direct-connect, not started): make a direct connection work in
+//! more networks, without any relay.
+//! Ground rule for all of these: no server ever carries file data, not even encrypted.
+//! Servers may only help the two peers find each other.
+//! TODO: IPv6 first. Bind dual stack and make sure every global IPv6 address of the
+//!       machine is in the address that is shared. Most mobile networks hand out IPv6,
+//!       and there is no NAT on it, only stateful firewalls, which open when both sides
+//!       send at the same time (see `qs_core::send`).
+//! TODO: check that the port mapping of the router (UPnP, PCP, NAT-PMP, iroh's
+//!       `portmapper`, on by default) still runs with `presets::Empty` and no relay, and
+//!       that the mapped address ends up in the address that is shared. Add a test.
+//! TODO: add the public IPv4 address the rendezvous server saw (`observed_ip`, see
+//!       `qs_rendezvous_api`) together with the local UDP port as one more candidate.
+//!       Many home routers keep the port, then this is the address seen from outside.
+//!       Needs the port of the endpoint to be known, so bind it before pairing.
 
 use crate::config::{RelaySetting, Settings};
 use iroh::{endpoint::presets, Endpoint, EndpointAddr, RelayMap, RelayMode, SecretKey};

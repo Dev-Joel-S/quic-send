@@ -1,3 +1,10 @@
+//! Receiving files.
+//!
+//! PLANNED (branch claude-direct-connect, not started): the receiver accepts a
+//! connection from the sender as well as dialing it, see the plan in `crate::send`.
+//! TODO: listen for the expected sender while dialing it, take the first connection
+//!       that comes up with the pinned id, close the other one.
+
 use crate::{
     common::{
         connection_path, receive_packet, send_packet, ConnectionPath, FileSendRecvTree,

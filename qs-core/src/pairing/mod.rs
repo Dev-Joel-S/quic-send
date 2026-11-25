@@ -26,6 +26,15 @@
 //! DONE: looking at a slot ([Claim::new]) spends nothing. The code is spent by the reply
 //!       ([Claim::complete]), which is the one guess its sender checks. A receiver that
 //!       gives up before that leaves the sender's code usable.
+//!
+//! PLANNED (branch claude-direct-connect, not started), see `crate::send` for the plan.
+//! TODO: the receiver seals its full address (`EndpointAddr`) into its reply, not only
+//!       its id, so the sender can dial it as well.
+//! TODO: both sides learn the public IPv4 address the rendezvous server saw, from the
+//!       answers to creating and to replying (`observed_ip`), and add it as a candidate.
+//! TODO: the moment to start dialing: the sender right after storing its address, the
+//!       receiver right after fetching it. A few seconds of trying on both sides cover
+//!       the gap between the two.
 
 pub mod code;
 pub mod pake;

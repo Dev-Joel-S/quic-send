@@ -9,6 +9,11 @@
 // There is no state that is shared between slots.
 //
 // No dependencies, no build step: this file is all the code that runs.
+//
+// PLANNED (branch claude-direct-connect, not started):
+// TODO: answer creating a slot and replying with `observed_ip`, from the
+//       `CF-Connecting-IP` header, so peers learn their public address. See
+//       qs-rendezvous-api/src/lib.rs. The Worker still never sees file data.
 
 import { DurableObject } from "cloudflare:workers";
 

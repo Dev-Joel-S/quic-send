@@ -26,6 +26,15 @@
 //! requests take `?wait=<seconds>` and answer `204 No Content` if nothing arrived in that
 //! time. Bodies are JSON, binary messages are base64 (url safe, no padding).
 //! Errors are a JSON [ErrorBody] with a fitting HTTP status.
+//!
+//! PLANNED (branch claude-direct-connect, not started):
+//! TODO: `SlotCreated` and `SlotReplied` get an optional `observed_ip`: the address the
+//!       request came from, as the server saw it (Cloudflare: `CF-Connecting-IP`, the
+//!       Rust server: the client address, from the proxy header with `--behind-proxy`).
+//!       Clients ignore members they do not know, so this stays API version 1. Update
+//!       `docs/rendezvous-api.md` and the shared tests in `qs-rendezvous/tests/server.rs`.
+//! TODO: the server still never sees file data, only this address and the sealed
+//!       messages it already passes.
 
 use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
