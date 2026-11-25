@@ -7,8 +7,8 @@
 //! # Rendezvous servers for short codes, tried in this order. Without one, qsend prints
 //! # a ticket instead. No server is built into the program.
 //! rendezvous = ["https://rendezvous.example.com", "https://backup.example.org"]
-//! # "default", "disabled" or the URL of your own relay
-//! relay = "default"
+//! # "disabled" (no relay, the default) or the URL of your own relay
+//! relay = "disabled"
 //! # Where received files go. "." is the directory qsend is started in.
 //! output_dir = "/home/me/Downloads"
 //! # Fixed UDP port instead of a random one
@@ -54,13 +54,14 @@ pub enum ConfigError {
     Parse { path: PathBuf, message: String },
 }
 
-/// Which relay servers an endpoint uses
+/// Which relay server an endpoint uses.
+///
+/// There is no public relay built in: peers connect to each other directly, nothing in
+/// between. Your own relay is possible for networks where that does not work.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum RelaySetting {
-    /// The public relay servers run by the iroh project
-    #[default]
-    Default,
     /// No relay at all. Peers have to reach each other directly.
+    #[default]
     Disabled,
     /// Your own relay server
     Custom(RelayUrl),
@@ -75,15 +76,20 @@ impl FromStr for RelaySetting {
         let url = s.strip_prefix("custom").map(str::trim).unwrap_or(s);
 
         match s {
-            "default" => Ok(Self::Default),
             "disabled" => Ok(Self::Disabled),
+            // The public relay of the iroh project used to be the default
+            "default" => Err(
+                "\"default\" was the public relay of the iroh project, which is no longer used. \
+                 Use \"disabled\" or the URL of your own relay"
+                    .to_string(),
+            ),
             _ if url.starts_with("http://") || url.starts_with("https://") => {
                 RelayUrl::from_str(url)
                     .map(Self::Custom)
                     .map_err(|e| format!("invalid relay url {url:?}: {e}"))
             }
             _ => Err(format!(
-                "invalid relay setting {s:?}: expected \"default\", \"disabled\" or a http(s) url"
+                "invalid relay setting {s:?}: expected \"disabled\" or the http(s) url of your own relay"
             )),
         }
     }
@@ -92,7 +98,6 @@ impl FromStr for RelaySetting {
 impl fmt::Display for RelaySetting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Default => write!(f, "default"),
             Self::Disabled => write!(f, "disabled"),
             Self::Custom(url) => write!(f, "{url}"),
         }
@@ -189,7 +194,7 @@ pub struct NetworkArgs {
     #[clap(long, value_name = "URL", global = true)]
     pub rendezvous: Vec<String>,
 
-    /// Relay server: "default", "disabled" or the URL of your own [default: default]
+    /// Relay server: "disabled" or the URL of your own [default: disabled]
     #[clap(long, value_name = "RELAY", global = true)]
     pub relay: Option<RelaySetting>,
 
@@ -256,7 +261,8 @@ mod tests {
         assert_eq!(Config::parse("").unwrap(), Config::default());
         let settings = Settings::resolve(&NetworkArgs::default(), None, Config::default());
         assert!(settings.rendezvous.is_empty());
-        assert_eq!(settings.relay, RelaySetting::Default);
+        // Peer to peer: no relay unless you run your own
+        assert_eq!(settings.relay, RelaySetting::Disabled);
         assert_eq!(settings.output_dir, None);
         assert_eq!(settings.port, None);
     }
@@ -303,7 +309,9 @@ mod tests {
     #[test]
     fn relay_setting_forms() {
         let url = RelayUrl::from_str("https://relay.example.com").unwrap();
-        assert_eq!("default".parse(), Ok(RelaySetting::Default));
+        // The public relay is gone, saying so beats silently doing something else
+        let old: Result<RelaySetting, _> = "default".parse();
+        assert!(old.unwrap_err().contains("no longer used"));
         assert_eq!(" disabled ".parse(), Ok(RelaySetting::Disabled));
         assert_eq!(
             "https://relay.example.com".parse(),
@@ -351,13 +359,16 @@ mod tests {
         // Everything on the command line: the file is overridden
         let args = NetworkArgs {
             rendezvous: vec!["https://flag".to_string()],
-            relay: Some(RelaySetting::Default),
+            relay: Some("https://flag-relay.example.com".parse().unwrap()),
             port: Some(2),
             copy: false,
         };
         let settings = Settings::resolve(&args, Some(PathBuf::from(".")), config());
         assert_eq!(settings.rendezvous, ["https://flag"]);
-        assert_eq!(settings.relay, RelaySetting::Default);
+        assert_eq!(
+            settings.relay.to_string(),
+            "https://flag-relay.example.com/"
+        );
         assert_eq!(settings.output_dir, Some(PathBuf::from(".")));
         assert_eq!(settings.port, Some(2));
     }

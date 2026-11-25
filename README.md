@@ -5,7 +5,7 @@ A peer-to-peer file transfer tool that uses the QUIC protocol to transfer data o
 This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomatic458/quic-send), which was archived in favor of [fsend](https://github.com/maxomatic458/fsend). The upstream author moved towards WebRTC, this fork stays on QUIC, which is the better fit for large transfers.
 
 > [!NOTE]
-> Because quic-send uses NAT traversal, a direct connection might not be possible on every network.
+> quic-send is peer to peer: the two machines talk to each other directly, there is no relay in between. That needs one of them to be reachable by the other: the same network, IPv6 without a blocking firewall, a public IP address or a forwarded UDP port. Behind two NAT routers on IPv4 a connection fails, unless you run [your own relay](#your-own-relay).
 
 ## What this fork changes
 
@@ -14,7 +14,7 @@ This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomat
 - **Post-quantum key exchange**: the QUIC handshake uses hybrid X25519MLKEM768 and both sides refuse a connection that fell back to a classical exchange, so a recorded transfer stays confidential against a future quantum adversary. The pairing mixes a PAKE secret and an ML-KEM-768 secret into its keys, an attacker has to break both.
 - **Optional password**: an extra password can be required on top of the code or ticket. Unlike Magic Wormhole, it is optional, not mandatory.
 - **Serverless mode**: no rendezvous and no relay at all. Peers exchange address and public key directly, like [transmitic](https://github.com/transmitic/transmitic). Useful for server-to-server transfers and for anyone who does not want to run infrastructure.
-- **Self-hosted rendezvous and relay**: there is no default rendezvous server, you run your own or use tickets. The iroh relay is configurable and can be disabled entirely. Out of the box it is the public relay of the iroh project, which only ever sees ciphertext.
+- **Peer to peer, no third party**: there is no default rendezvous server and no relay. Nothing of the public iroh infrastructure is used, neither its relays nor its address lookup. You can run your own rendezvous server for short codes, and your own relay for networks where a direct connection is impossible.
 - **Saved peers**: two machines that saved each other transfer without any code or ticket.
 - **CLI only**: the Tauri GUI from upstream has been removed. One binary, no webview, no bundler toolchain.
 - **Sane destination handling**: files land in the user's Downloads folder by default instead of the current working directory, existing destination folders are no longer silently merged into, and incomplete transfers are written as `.part` files with a separate resume state.
@@ -23,11 +23,10 @@ This is a maintained fork of [maxomatic458/quic-send](https://github.com/maxomat
 
 ## Features inherited from upstream
 
-- **P2P data transfer**: files are sent over a direct connection, data is never relayed through a server by default.
+- **P2P data transfer**: files are sent over a direct connection between the two machines.
 - **Encryption**: QUIC with TLS 1.3, provided by [iroh](https://github.com/n0-computer/iroh) and [rustls](https://crates.io/crates/rustls), with the peer identity pinned through its iroh endpoint id.
 - **Resumable transfers**: if the connection drops, the transfer continues where it left off.
 - **Transfer files and folders**
-- **No port forwarding required**: UDP hole punching, provided by iroh.
 
 ## Installation
 
@@ -136,7 +135,7 @@ With a short code the password goes into the PAKE in addition to the code. With 
 ### Without any server
 
 ```
-$ qsend send --relay disabled --port 4433 <file/folder>
+$ qsend send --port 4433 <file/folder>
 Ticket:
 
 qs1:TYXpn-lm8ladLNDYvhrI_nKROlu2vy2HvxDI6Ync2pIBAQDAAAICme8C
@@ -145,12 +144,12 @@ or, typed by hand, one of:
 
 192.168.1.5:4433/4d85e99fe966f2569d2cd0d8be1ac8fe72913a5bb6bf2d87bf10c8e989dcda92
 
-$ qsend receive --relay disabled 192.168.1.5:4433/4d85e99f...
+$ qsend receive 192.168.1.5:4433/4d85e99f...
 ```
 
 Nothing but the two machines is involved. The address always comes with the public key: an IP address alone could not be authenticated and is refused.
 
-Without a relay there is no hole punching, so the sender has to be reachable by the receiver: the same network, a forwarded UDP port, or a public IP address. `--port` gives the sender a fixed port to forward.
+The sender has to be reachable by the receiver: the same network, IPv6 without a firewall that blocks it, a public IP address, or a forwarded UDP port. `--port` gives the sender a fixed port to forward. There is no hole punching, which needs a relay to coordinate.
 
 `qsend send --direct` prints a ticket even when a rendezvous server is configured.
 
@@ -176,7 +175,7 @@ A saved peer is recognized by its public key, no server takes part in that. For 
 
 Only your user can read `identity.key`: mode 0600 on Linux, and on Windows an access list of its own with your account as the only entry, nothing inherited from the folder. That does not stop an administrator, a backup or somebody who reads the disk from another system. `qsend peers passphrase` seals the key with a passphrase as well (PBKDF2-HMAC-SHA256 with 600,000 rounds and ChaCha20-Poly1305, both from aws-lc-rs). You are then asked for it whenever a saved peer is used. An empty passphrase removes it again, and a forgotten one cannot be recovered: remove the file and save your peers again. Run `qsend peers passphrase` before the first `--save-peer` if you want a key that was never on the disk without the passphrase. Sealing a key that was already stored cannot undo that, the old copy may still be found by somebody who reads the disk itself.
 
-The peer is dialed at the address it had when it was saved (its relay and its IP addresses). If it moved, pair once more with `--save-peer`. Without a relay, give the receiving machine a fixed `--port`.
+The peer is dialed at the address it had when it was saved (its IP addresses, and its relay if you run one). If it moved, pair once more with `--save-peer`. Give the receiving machine a fixed `--port`, so the address stays the same.
 
 If a peer is saved after a transfer with a plain ticket and no password, the sender asks first and shows the receiver's fingerprint to compare, because anyone who had the ticket could be that receiver.
 
@@ -190,8 +189,8 @@ If a peer is saved after a transfer with a plain ticket and no password, the sen
 # Rendezvous servers for short codes, tried in this order. Without one, qsend prints
 # a ticket instead. No server is built into the program.
 rendezvous = ["https://rz.example.com", "https://backup.example.org"]
-# "default", "disabled" or the URL of your own relay
-relay = "default"
+# "disabled" (no relay, the default) or the URL of your own relay
+relay = "disabled"
 # Where received files go. "." is the directory qsend is started in.
 output_dir = "/home/me/Downloads"
 # Fixed UDP port instead of a random one
@@ -250,7 +249,7 @@ What a server has to do is written down in [docs/rendezvous-api.md](docs/rendezv
 
 ### Your own relay
 
-The relay helps two peers behind NAT find a direct path, and carries the encrypted traffic if there is none. `relay = "https://relay.example.com"` points `qsend` at your own, which is iroh's relay server, see the [iroh documentation](https://github.com/n0-computer/iroh). `relay = "disabled"` uses none.
+By default there is no relay: the two machines connect directly or not at all. If both sit behind NAT routers on IPv4, that fails. For that case you can run your own relay, iroh's relay server (see the [iroh documentation](https://github.com/n0-computer/iroh)), and point both sides at it with `relay = "https://relay.example.com"`. It helps the two find a direct path (hole punching), and carries the encrypted traffic if there is none. It only ever sees ciphertext. The public relays of the iroh project are not used, `relay = "default"` is refused with a message.
 
 ## Comparison with other file transfer tools
 
@@ -266,7 +265,7 @@ The relay helps two peers behind NAT find a direct path, and carries the encrypt
 | Works without any server | ✅ | ❌ | ❌ | ❌ |
 | Self-hostable infrastructure | ✅ | (✅) | ✅ | ✅ |
 
-\* While it is possible in Magic Wormhole, establishing a direct connection is unlikely, since it tries to establish a direct TCP connection. quic-send uses UDP hole punching instead, which works on most networks.
+\* While it is possible in Magic Wormhole, establishing a direct connection is unlikely, since it tries to establish a direct TCP connection. quic-send connects directly over UDP, and with your own relay also through NAT by hole punching.
 
 ## Security model
 

@@ -23,7 +23,6 @@ pub async fn bind(settings: &Settings, secret_key: SecretKey) -> Result<Endpoint
             .secret_key(secret_key.clone())
             .alpns(vec![QS_ALPN.to_vec()])
             .relay_mode(match &settings.relay {
-                RelaySetting::Default => RelayMode::Default,
                 RelaySetting::Disabled => RelayMode::Disabled,
                 RelaySetting::Custom(url) => RelayMode::Custom(RelayMap::from(url.clone())),
             });
