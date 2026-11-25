@@ -39,7 +39,7 @@ Prebuilt downloads are on the [releases page](https://github.com/dev-joel-s/quic
 | Debian, Ubuntu | `quic-send_<version>-1_amd64.deb`, install with `sudo apt install ./quic-send_*.deb` |
 | Windows | `qsend-<version>-x86_64-windows.exe`, a standalone executable |
 
-`SHA256SUMS` lists the checksums of all files.
+`<version>` is the version of the release, like `0.5.0` or `0.5.0-beta`. `SHA256SUMS` lists the checksums of all files.
 
 On Arch Linux, download the `PKGBUILD` that is attached to the release and run `makepkg -si` next to it. It builds from the source archive of that release and has its checksum.
 
@@ -89,6 +89,8 @@ qsend receive K7X4-M2QP
 ```
 
 The receiver needs the same rendezvous server. Several can be listed (`rendezvous = [...]` in the config file, or `--rendezvous` more than once): the sender uses the first one that answers, the receiver looks for the code on them in the same order. Keep the list the same on both sides: if the two end up on different servers, the receiver can meet somebody else's code that happens to have the same first two characters there, and both pairings fail. The code can be typed with or without the dash and in any case, `I`, `L` and `O` are read as `1` and `0`. A code works once: after a wrong attempt the sender starts again and gets a new one.
+
+The code or ticket is not copied to the clipboard unless you add `--copy` (or set `clipboard = true` in the config file).
 
 Both sides print a short fingerprint of their own id and of the peer's (`This device`, `Sender`, `Receiver`). Compare them if you want to be sure who is on the other end.
 
@@ -183,7 +185,7 @@ If a peer is saved after a transfer with a plain ticket and no password, the sen
 `qsend config` shows where the config file is and which settings are in effect. Flags on the command line override it.
 
 ```toml
-# ~/.config/quic-send/config.toml on Linux
+# ~/.config/quic-send/config.toml on Linux, %APPDATA%\quic-send\config.toml on Windows
 
 # Rendezvous servers for short codes, tried in this order. Without one, qsend prints
 # a ticket instead. No server is built into the program.
@@ -208,7 +210,16 @@ A mistake in the file, including a setting that does not exist, is an error with
 
 No rendezvous server is built into `qsend`. Short codes need one that you or somebody you know runs, and its address in the config file of both sides. There are two implementations of the same API ([docs/rendezvous-api.md](docs/rendezvous-api.md)), a client cannot tell them apart:
 
-- A **Cloudflare Worker**, in [rendezvous-worker](rendezvous-worker/). This is the one to start with: no machine to look after, `npx wrangler deploy` and it runs. Every code has its own Durable Object.
+- A **Cloudflare Worker**, in [rendezvous-worker](rendezvous-worker/). This is the one to start with: no machine to look after, and no domain of your own needed, Cloudflare gives it a `workers.dev` address. Every code has its own Durable Object. With a free Cloudflare account and Node.js:
+
+  ```
+  cd rendezvous-worker
+  npm ci
+  npx wrangler login
+  npx wrangler deploy
+  ```
+
+  `deploy` prints the address, which goes into `rendezvous = [...]` in the config file of both sides. More in [rendezvous-worker/README.md](rendezvous-worker/README.md).
 - The **Rust server** `qs-rendezvous`, in this repo and in the Linux download, for your own machine.
 
 Both pass three opaque messages between the two peers of a pairing and have no secrets. The rest of this section is about the Rust server, which keeps everything in memory.
@@ -267,10 +278,23 @@ The code, or the ticket, is the secret. Anyone who sees it in time can take the 
 - **A wrong code** fails on both sides and uses the code up. One guess per code, with a chance of one in a billion, and no offline dictionary attack.
 - **With a ticket and no password**, the first peer to connect is the receiver. That is all a ticket can promise.
 
+### Post-quantum protection
+
+What a quantum computer could do to quic-send, and what is done about it:
+
+| Part | Algorithm | Against a recorded transfer that is attacked later | Against an attacker who has a quantum computer while the transfer runs |
+|------|-----------|-----------------------------------------------------|------------------------------------------------------------------------|
+| File data (QUIC connection) | hybrid X25519 + ML-KEM-768 (`X25519MLKEM768`), both sides refuse anything else | protected, an attacker has to break both | the key exchange is protected, see the next row for the identity |
+| Who is on the other end | Ed25519 keys (the iroh endpoint ids), classical | not affected, a signature is only useful live | **not protected**: such an attacker could pose as the peer. This needs a quantum computer at the time of the transfer and the ticket or the saved peer's key |
+| Pairing with a short code, the sealed peer address | CPace (classical) plus ML-KEM-768, both go into the key | protected, the address stays sealed even if CPace falls later | see the next row |
+| Telling a right code from a wrong one | CPace on ristretto255, classical | not affected, the code is used up after one attempt | **not protected**: with a quantum computer an attacker could test guesses at a code while it is valid (five minutes). Unlike SPAKE2, CPace has no fixed constants whose one-time break opens every code, each single guess costs a discrete logarithm of its own |
+| Password on top of the code | the same CPace | as above | as above |
+
+In short: what you send stays confidential against a quantum computer that appears later. Authentication, who is on the other end, is classical, as it is in every post-quantum hybrid that exists in TLS today. No audited post-quantum PAKE exists, so none is used. The ML-KEM-768 is the formally verified one from [libcrux](https://github.com/cryspen/libcrux) for the pairing, and the one of [aws-lc](https://github.com/aws/aws-lc-rs) inside the QUIC handshake.
+
 What you should know before relying on it:
 
 - The PAKE is CPace on ristretto255 from the [`pake-cpace`](https://crates.io/crates/pake-cpace) crate, which has not had an independent audit and is an early variant of CPace, not byte for byte the CFRG draft. The ML-KEM-768 of a pairing is the formally verified one from [libcrux](https://github.com/cryspen/libcrux) (`libcrux-ml-kem`). Everything else cryptographic comes from [aws-lc-rs](https://github.com/aws/aws-lc-rs) and rustls, including the hybrid key exchange of the QUIC connection.
-- CPace is not a post-quantum PAKE, no audited one exists. What a pairing has against a quantum computer: the key that seals the peer address also depends on ML-KEM-768, so a recorded pairing stays sealed, and CPace has no fixed constants whose one-time break would open every code, each single guess of a code costs an attacker a discrete logarithm of its own.
 - Codes and tickets are not copied to the clipboard unless you ask for it, with `--copy` or `clipboard = true` in the config file. A clipboard history or a synced clipboard (Windows can sync it to the cloud) would show them to others before they are used.
 - The code of this fork has not been audited by anyone outside either.
 - CI checks every dependency with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) on every change and once a week: known vulnerabilities, licenses, and that every crate comes from crates.io (`deny.toml`). `cargo deny check` runs the same locally.
