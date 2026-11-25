@@ -16,8 +16,18 @@
 //!       `crate::pairing`): both dial right after the sealed addresses were delivered,
 //!       and keep trying for a few seconds.
 //! TODO: saved peers (`Sender::dial`, `Receiver::accept`) get the same, both sides dial.
-//! TODO: tickets have no rendezvous, so nobody can agree on a moment. They stay as they
-//!       are: the sender has to be reachable. Say so in the error when it is not.
+//! TODO: tickets: the receiver knows the sender's address from the ticket, but the sender
+//!       does not know the receiver's, so it cannot dial back. Add a reply ticket: after
+//!       the receiver enters the sender's ticket, it shows its own (address and key), and
+//!       the sender enters that. Then both know each other and both dial. No server is
+//!       needed, only copying in both directions.
+//! TODO: the timing needs no agreement: both sides keep sending for about a minute.
+//!       Firewalls and routers keep an opened path for at least about 30 seconds, so the
+//!       attempts of the two sides overlap on their own.
+//! TODO: the reply ticket stays optional. Without it, a ticket works as now when the
+//!       sender is reachable, and the error says that a reply ticket may help.
+//! TODO: the sender pins the receiver's key from the reply ticket, like a saved peer.
+//!       Until then the first peer with the ticket is the receiver, as now.
 //! TODO: when no path works, say what is most likely in the way (no IPv6 on one side,
 //!       two NAT routers) instead of only timing out.
 

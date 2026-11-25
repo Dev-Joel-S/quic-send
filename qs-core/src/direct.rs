@@ -20,6 +20,10 @@
 //!       with the exporter value, see `crate::password`.
 //! DONE: the README says clearly that without a relay the sender must be reachable
 //!       by the receiver (same network, a forwarded port, or a public IP).
+//!
+//! PLANNED (branch claude-direct-connect, not started): a reply ticket, so both sides
+//! can dial each other, see `crate::send`. It uses the same format as a ticket, the
+//! receiver prints it after reading the sender's ticket.
 
 use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
 use iroh::{EndpointAddr, EndpointId};
